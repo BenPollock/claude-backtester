@@ -1,4 +1,7 @@
-"""Console report output for backtest results."""
+"""Console and chart report output for backtest results."""
+
+import matplotlib.pyplot as plt
+import pandas as pd
 
 from backtester.analytics.metrics import (
     compute_all_metrics, cagr, sharpe_ratio, sortino_ratio, max_drawdown,
@@ -73,3 +76,36 @@ def print_report(result: BacktestResult) -> dict:
     print("=" * 60 + "\n")
 
     return metrics
+
+
+def plot_results(result: BacktestResult) -> None:
+    """Show equity curve vs benchmark and drawdown chart."""
+    equity = result.equity_series
+    config = result.config
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7), sharex=True,
+                                    gridspec_kw={"height_ratios": [3, 1]})
+
+    # --- Top panel: equity curves ---
+    ax1.plot(equity.index, equity.values, label=config.strategy_name, linewidth=1.5)
+
+    bm = result.benchmark_series
+    if bm is not None and len(bm) >= 2:
+        ax1.plot(bm.index, bm.values, label=f"{config.benchmark} Buy & Hold",
+                 linewidth=1.2, alpha=0.7)
+
+    ax1.set_ylabel("Equity ($)")
+    ax1.set_title(f"{config.strategy_name}  |  {config.start_date} to {config.end_date}")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.3)
+
+    # --- Bottom panel: strategy drawdown ---
+    cummax = equity.cummax()
+    drawdown = (equity - cummax) / cummax * 100  # as percentage
+    ax2.fill_between(drawdown.index, drawdown.values, 0, color="red", alpha=0.35)
+    ax2.set_ylabel("Drawdown (%)")
+    ax2.set_xlabel("Date")
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    plt.show()

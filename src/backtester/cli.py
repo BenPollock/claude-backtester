@@ -10,7 +10,7 @@ import click
 import backtester.strategies.sma_crossover  # noqa: F401
 from backtester.config import BacktestConfig, RegimeFilter
 from backtester.engine import BacktestEngine
-from backtester.analytics.report import print_report
+from backtester.analytics.report import print_report, plot_results
 from backtester.strategies.registry import list_strategies
 
 
@@ -76,6 +76,7 @@ def run(strategy, tickers, benchmark, start, end, cash, max_positions, max_alloc
     engine = BacktestEngine(config)
     result = engine.run()
     print_report(result)
+    plot_results(result)
 
 
 @cli.command("list-strategies")
