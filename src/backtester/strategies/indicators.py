@@ -40,3 +40,21 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     ], axis=1).max(axis=1)
 
     return tr.rolling(window=period, min_periods=period).mean()
+
+
+def macd(
+    series: pd.Series,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """MACD (Moving Average Convergence Divergence).
+
+    Returns (macd_line, signal_line, histogram).
+    """
+    ema_fast = series.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram

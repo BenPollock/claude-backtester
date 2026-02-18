@@ -12,6 +12,7 @@ from backtester.data.sources.base import DataSource
 
 # Import to register strategies
 import backtester.strategies.sma_crossover  # noqa: F401
+import backtester.strategies.rule_based  # noqa: F401
 
 
 def make_price_df(

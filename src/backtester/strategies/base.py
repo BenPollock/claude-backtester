@@ -35,6 +35,14 @@ class Strategy(ABC):
         """
         ...
 
+    def compute_benchmark_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add indicator columns to the benchmark DataFrame.
+
+        Called once before the main loop. Default is a no-op.
+        Override in strategies that need benchmark-derived indicators.
+        """
+        return df
+
     @abstractmethod
     def generate_signals(
         self,

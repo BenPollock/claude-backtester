@@ -100,6 +100,7 @@ class BacktestEngine:
             # Compute benchmark indicators for regime filter
             if config.regime_filter:
                 benchmark_data = self._compute_regime_indicators(benchmark_data)
+            benchmark_data = strategy.compute_benchmark_indicators(benchmark_data)
 
         # 5. Get trading days
         trading_days = self._calendar.trading_days(config.start_date, config.end_date)
