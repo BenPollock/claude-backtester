@@ -35,12 +35,14 @@ class DataManager:
 
         if cached_range is not None:
             cache_start, cache_end = cached_range
-            if cache_start <= start and cache_end >= end:
-                # Cache fully covers the range
+            trading_days = self._calendar.trading_days(start, end)
+            first_needed = trading_days[0].date() if len(trading_days) > 0 else start
+            last_needed = trading_days[-1].date() if len(trading_days) > 0 else end
+            if cache_start <= first_needed and cache_end >= last_needed:
+                logger.info(f"Fetching {symbol} from cache")
                 df = self._cache.load(symbol)
                 return self._prepare(df, symbol, start, end)
 
-        # Fetch from source (full range to keep cache complete)
         logger.info(f"Fetching {symbol} from source")
         df = self._source.fetch(symbol, start, end)
         df = self._cache.merge_and_save(symbol, df)

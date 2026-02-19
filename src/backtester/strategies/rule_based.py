@@ -19,6 +19,10 @@ INDICATOR_REGISTRY = {
     "rsi": (ind.rsi, False),
     "atr": (ind.atr, True),
     "macd": (ind.macd, False),
+    "bollinger": (ind.bollinger, False),
+    "stochastic": (ind.stochastic, True),
+    "adx": (ind.adx, True),
+    "obv": (ind.obv, True),
 }
 
 OPERATORS = {
@@ -48,6 +52,15 @@ def _apply_indicator(df: pd.DataFrame, col_name: str, spec: dict) -> pd.DataFram
         df[f"{col_name}_line"] = macd_line
         df[f"{col_name}_signal"] = signal_line
         df[f"{col_name}_hist"] = histogram
+    elif fn_name == "bollinger":
+        upper, middle, lower = result
+        df[f"{col_name}_upper"] = upper
+        df[f"{col_name}_middle"] = middle
+        df[f"{col_name}_lower"] = lower
+    elif fn_name == "stochastic":
+        k, d = result
+        df[f"{col_name}_k"] = k
+        df[f"{col_name}_d"] = d
     else:
         df[col_name] = result
 

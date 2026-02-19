@@ -6,7 +6,7 @@ import pytest
 from datetime import date
 
 from backtester.strategies.registry import get_strategy, list_strategies
-from backtester.strategies.indicators import sma, rsi, macd
+from backtester.strategies.indicators import sma, rsi, macd, bollinger, stochastic, adx, obv
 from backtester.portfolio.portfolio import PortfolioState
 from backtester.portfolio.position import Position
 from backtester.types import SignalAction
@@ -256,3 +256,140 @@ class TestRuleBasedStrategy:
         assert "macd_line" in result.columns
         assert "macd_signal" in result.columns
         assert "macd_hist" in result.columns
+
+    def test_bollinger_indicator_expands(self):
+        s = get_strategy("rule_based")
+        s.configure({
+            "indicators": {"bb": {"fn": "bollinger", "period": 20}},
+            "buy_when": [["Close", "<", "bb_lower"]],
+            "sell_when": [],
+        })
+        df = make_price_df(days=100)
+        result = s.compute_indicators(df)
+        assert "bb_upper" in result.columns
+        assert "bb_middle" in result.columns
+        assert "bb_lower" in result.columns
+
+    def test_stochastic_indicator_expands(self):
+        s = get_strategy("rule_based")
+        s.configure({
+            "indicators": {"stoch": {"fn": "stochastic", "k_period": 14}},
+            "buy_when": [["stoch_k", "<", 20]],
+            "sell_when": [],
+        })
+        df = make_price_df(days=100)
+        result = s.compute_indicators(df)
+        assert "stoch_k" in result.columns
+        assert "stoch_d" in result.columns
+
+
+# ---------------------------------------------------------------------------
+# Bollinger Bands tests
+# ---------------------------------------------------------------------------
+
+class TestBollinger:
+    def test_returns_three_series(self):
+        prices = pd.Series(range(1, 101), dtype=float)
+        result = bollinger(prices, period=20)
+        assert isinstance(result, tuple) and len(result) == 3
+        for s in result:
+            assert isinstance(s, pd.Series)
+
+    def test_warmup_produces_nan(self):
+        prices = pd.Series(range(1, 101), dtype=float)
+        upper, middle, lower = bollinger(prices, period=20)
+        assert upper.iloc[:19].isna().all()
+        assert middle.iloc[:19].isna().all()
+        assert lower.iloc[:19].isna().all()
+
+    def test_middle_equals_sma(self):
+        prices = pd.Series(range(1, 101), dtype=float)
+        _, middle, _ = bollinger(prices, period=20)
+        expected_sma = sma(prices, 20)
+        pd.testing.assert_series_equal(middle, expected_sma)
+
+
+# ---------------------------------------------------------------------------
+# Stochastic Oscillator tests
+# ---------------------------------------------------------------------------
+
+class TestStochastic:
+    def test_returns_two_series(self):
+        df = make_price_df(days=100)
+        result = stochastic(df, k_period=14, d_period=3)
+        assert isinstance(result, tuple) and len(result) == 2
+        for s in result:
+            assert isinstance(s, pd.Series)
+
+    def test_values_in_range(self):
+        df = make_price_df(days=100)
+        k, d = stochastic(df, k_period=14, d_period=3)
+        valid_k = k.dropna()
+        valid_d = d.dropna()
+        assert (valid_k >= 0).all() and (valid_k <= 100).all()
+        assert (valid_d >= 0).all() and (valid_d <= 100).all()
+
+    def test_warmup_produces_nan(self):
+        df = make_price_df(days=100)
+        k, d = stochastic(df, k_period=14, d_period=3)
+        assert k.iloc[:13].isna().all()
+        assert d.iloc[:15].isna().all()
+
+
+# ---------------------------------------------------------------------------
+# ADX tests
+# ---------------------------------------------------------------------------
+
+class TestADX:
+    def test_returns_series(self):
+        df = make_price_df(days=100)
+        result = adx(df, period=14)
+        assert isinstance(result, pd.Series)
+
+    def test_values_in_range(self):
+        df = make_price_df(days=100)
+        result = adx(df, period=14)
+        valid = result.dropna()
+        assert (valid >= 0).all() and (valid <= 100).all()
+
+    def test_trending_data_high_adx(self):
+        # Strong uptrend should produce a meaningful ADX
+        dates = pd.bdate_range("2020-01-02", periods=100, freq="B")
+        prices = [100.0 + i * 2.0 for i in range(100)]
+        df = pd.DataFrame({
+            "Open": [p - 0.5 for p in prices],
+            "High": [p + 1.0 for p in prices],
+            "Low": [p - 1.0 for p in prices],
+            "Close": prices,
+        }, index=dates)
+        result = adx(df, period=14)
+        # Last value should indicate strong trend
+        assert result.iloc[-1] > 25
+
+
+# ---------------------------------------------------------------------------
+# OBV tests
+# ---------------------------------------------------------------------------
+
+class TestOBV:
+    def test_returns_series(self):
+        df = make_price_df(days=50)
+        result = obv(df)
+        assert isinstance(result, pd.Series)
+
+    def test_rising_prices_positive_obv(self):
+        dates = pd.bdate_range("2020-01-02", periods=20, freq="B")
+        prices = [100.0 + i for i in range(20)]
+        df = pd.DataFrame({
+            "Close": prices,
+            "Volume": [1_000_000] * 20,
+        }, index=dates)
+        result = obv(df)
+        # All prices rising → cumulative OBV should be positive at end
+        assert result.iloc[-1] > 0
+
+    def test_no_params_required(self):
+        df = make_price_df(days=30)
+        # Should work with no extra params
+        result = obv(df)
+        assert len(result) == 30

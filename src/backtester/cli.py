@@ -28,7 +28,9 @@ def cli(verbose: bool) -> None:
 
 @cli.command()
 @click.option("--strategy", required=True, help="Strategy name (e.g. sma_crossover)")
-@click.option("--tickers", required=True, help="Comma-separated ticker symbols")
+@click.option("--tickers", required=False, default=None, help="Comma-separated ticker symbols")
+@click.option("--market", type=click.Choice(["us", "ca", "us_ca"]), default="us_ca", help="Market scope when tickers omitted")
+@click.option("--universe", type=click.Choice(["index", "all"]), default="index", help="Universe breadth when tickers omitted")
 @click.option("--benchmark", required=True, help="Benchmark ticker (e.g. SPY)")
 @click.option("--start", required=True, type=click.DateTime(formats=["%Y-%m-%d"]), help="Start date (YYYY-MM-DD)")
 @click.option("--end", required=True, type=click.DateTime(formats=["%Y-%m-%d"]), help="End date (YYYY-MM-DD)")
@@ -42,10 +44,17 @@ def cli(verbose: bool) -> None:
 @click.option("--regime-benchmark", default=None, help="Regime filter benchmark (e.g. SPY)")
 @click.option("--regime-fast", default=100, type=int, help="Regime filter fast SMA period")
 @click.option("--regime-slow", default=200, type=int, help="Regime filter slow SMA period")
-def run(strategy, tickers, benchmark, start, end, cash, max_positions, max_alloc,
-        fee, slippage_bps, params, cache_dir, regime_benchmark, regime_fast, regime_slow):
+def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_positions,
+        max_alloc, fee, slippage_bps, params, cache_dir, regime_benchmark, regime_fast,
+        regime_slow):
     """Run a backtest."""
-    ticker_list = [t.strip().upper() for t in tickers.split(",")]
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",")]
+    else:
+        from backtester.data.universe import UniverseProvider
+        provider = UniverseProvider()
+        ticker_list = provider.get_tickers(market=market, universe=universe)
+        click.echo(f"Universe: {len(ticker_list)} tickers ({market}/{universe})")
     strategy_params = json.loads(params)
 
     regime_filter = None
