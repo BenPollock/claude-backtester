@@ -10,7 +10,7 @@ import click
 import backtester.strategies.sma_crossover  # noqa: F401
 from backtester.config import BacktestConfig, RegimeFilter
 from backtester.engine import BacktestEngine
-from backtester.analytics.report import print_report, plot_results
+from backtester.analytics.report import print_report, plot_results, export_activity_log_csv
 from backtester.strategies.registry import list_strategies
 
 
@@ -44,9 +44,10 @@ def cli(verbose: bool) -> None:
 @click.option("--regime-benchmark", default=None, help="Regime filter benchmark (e.g. SPY)")
 @click.option("--regime-fast", default=100, type=int, help="Regime filter fast SMA period")
 @click.option("--regime-slow", default=200, type=int, help="Regime filter slow SMA period")
+@click.option("--export-log", default=None, type=click.Path(), help="Export activity log to CSV file")
 def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_positions,
         max_alloc, fee, slippage_bps, params, cache_dir, regime_benchmark, regime_fast,
-        regime_slow):
+        regime_slow, export_log):
     """Run a backtest."""
     if tickers:
         ticker_list = [t.strip().upper() for t in tickers.split(",")]
@@ -85,6 +86,9 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
     engine = BacktestEngine(config)
     result = engine.run()
     print_report(result)
+    if export_log:
+        export_activity_log_csv(result, export_log)
+        click.echo(f"Activity log exported to {export_log}")
     plot_results(result)
 
 

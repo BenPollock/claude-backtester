@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from backtester.portfolio.position import Position
-from backtester.portfolio.order import Trade
+from backtester.portfolio.order import Trade, TradeLogEntry
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class Portfolio:
     positions: dict[str, Position] = field(default_factory=dict)
     equity_history: list[tuple[date, float]] = field(default_factory=list)
     trade_log: list[Trade] = field(default_factory=list)
+    activity_log: list[TradeLogEntry] = field(default_factory=list)
 
     @property
     def total_equity(self) -> float:

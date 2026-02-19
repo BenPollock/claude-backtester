@@ -5,7 +5,7 @@ from datetime import date
 
 import pandas as pd
 
-from backtester.portfolio.order import Order, Fill
+from backtester.portfolio.order import Order, Fill, TradeLogEntry
 from backtester.portfolio.portfolio import Portfolio
 from backtester.execution.slippage import SlippageModel, FixedSlippage
 from backtester.execution.fees import FeeModel, PerTradeFee
@@ -102,13 +102,26 @@ class SimulatedBroker:
                 pos = portfolio.open_position(order.symbol)
                 pos.add_lot(quantity, fill_price, current_date, commission)
                 portfolio.cash -= fill_price * quantity + commission
+                portfolio.activity_log.append(TradeLogEntry(
+                    date=current_date, symbol=order.symbol, action=Side.BUY,
+                    quantity=quantity, price=fill_price,
+                    value=quantity * fill_price, avg_cost_basis=None,
+                    fees=commission, slippage=slippage_amount,
+                ))
 
             elif order.side == Side.SELL:
                 pos = portfolio.get_position(order.symbol)
                 if pos is not None:
+                    avg_cost = pos.avg_entry_price
                     trades = pos.sell_lots_fifo(quantity, fill_price, current_date, commission)
                     portfolio.trade_log.extend(trades)
                     portfolio.cash += fill_price * quantity - commission
+                    portfolio.activity_log.append(TradeLogEntry(
+                        date=current_date, symbol=order.symbol, action=Side.SELL,
+                        quantity=quantity, price=fill_price,
+                        value=quantity * fill_price, avg_cost_basis=avg_cost,
+                        fees=commission, slippage=slippage_amount,
+                    ))
                     if pos.total_quantity == 0:
                         portfolio.close_position(order.symbol)
 

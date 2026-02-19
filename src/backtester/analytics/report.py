@@ -1,5 +1,8 @@
 """Console and chart report output for backtest results."""
 
+import csv
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import pandas as pd
 
@@ -75,7 +78,45 @@ def print_report(result: BacktestResult) -> dict:
     print(f"\nNote: Uses split-adjusted close prices. Dividends not included.")
     print("=" * 60 + "\n")
 
+    _print_activity_log(result)
+
     return metrics
+
+
+def _print_activity_log(result: BacktestResult) -> None:
+    """Print the per-fill activity log as a formatted table."""
+    entries = result.activity_log
+    if not entries:
+        return
+
+    print("--- Activity Log ---")
+    header = f"{'Date':<12} {'Ticker':<8} {'Action':<6} {'Qty':>6} {'Price':>10} {'Value':>12} {'Cost Basis':>12} {'Fees':>8} {'Slippage':>10}"
+    print(header)
+    print("-" * len(header))
+    for e in entries:
+        cb = f"${e.avg_cost_basis:>10,.2f}" if e.avg_cost_basis is not None else f"{'N/A':>11}"
+        print(
+            f"{str(e.date):<12} {e.symbol:<8} {e.action.name:<6} {e.quantity:>6} "
+            f"${e.price:>9,.2f} ${e.value:>11,.2f} {cb} ${e.fees:>7,.2f} ${e.slippage:>9,.4f}"
+        )
+    print()
+
+
+def export_activity_log_csv(result: BacktestResult, filepath: str) -> None:
+    """Write the activity log to a CSV file."""
+    path = Path(filepath)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "symbol", "action", "quantity", "price", "value",
+                         "avg_cost_basis", "fees", "slippage"])
+        for e in result.activity_log:
+            writer.writerow([
+                str(e.date), e.symbol, e.action.name, e.quantity,
+                f"{e.price:.4f}", f"{e.value:.2f}",
+                f"{e.avg_cost_basis:.4f}" if e.avg_cost_basis is not None else "",
+                f"{e.fees:.2f}", f"{e.slippage:.4f}",
+            ])
 
 
 def plot_results(result: BacktestResult) -> None:

@@ -46,6 +46,10 @@ class BacktestResult:
     def trades(self):
         return self.portfolio.trade_log
 
+    @property
+    def activity_log(self):
+        return self.portfolio.activity_log
+
 
 class BacktestEngine:
     """Main backtest orchestrator.

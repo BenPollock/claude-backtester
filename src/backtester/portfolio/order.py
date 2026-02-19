@@ -32,6 +32,21 @@ class Fill:
     slippage: float  # slippage amount in price terms
 
 
+@dataclass(frozen=True)
+class TradeLogEntry:
+    """Per-fill activity log entry for every BUY and SELL."""
+
+    date: date
+    symbol: str
+    action: Side          # BUY or SELL
+    quantity: int
+    price: float          # fill price (after slippage)
+    value: float          # quantity * price
+    avg_cost_basis: float | None  # SELL only: weighted avg entry price before sale
+    fees: float           # commission
+    slippage: float       # slippage in price terms
+
+
 @dataclass
 class Trade:
     """Completed round-trip trade."""
