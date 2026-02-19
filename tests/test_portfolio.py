@@ -111,3 +111,27 @@ class TestPortfolio:
         weight = portfolio.position_weight("AAPL")
         # 10000 / 100000 = 0.10
         assert abs(weight - 0.10) < 0.001
+
+    def test_close_position_with_remaining_qty_no_op(self, portfolio):
+        """close_position() should not remove a position that still has shares."""
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 150.0, date(2020, 1, 2))
+
+        portfolio.close_position("AAPL")
+        # Position still has qty > 0, so it should remain
+        assert portfolio.has_position("AAPL")
+        assert portfolio.positions["AAPL"].total_quantity == 100
+
+    def test_position_weight_zero_equity(self):
+        """Should return 0.0 when equity is zero or negative."""
+        p = Portfolio(cash=0.0)
+        pos = p.open_position("AAPL")
+        pos.add_lot(10, 100.0, date(2020, 1, 2))
+        pos.update_market_price(0.0)
+        # cash=0, market_value=0 → equity=0
+        assert p.position_weight("AAPL") == 0.0
+
+    def test_max_position_value_empty(self):
+        """Empty portfolio should return 0.0 for max_position_value."""
+        p = Portfolio(cash=100_000.0)
+        assert p.max_position_value() == 0.0

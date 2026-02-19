@@ -108,3 +108,60 @@ class TestSimulatedBroker:
 
         assert fills[0].commission == 5.0
         assert portfolio.cash == 100_000.0 - 10_000.0 - 5.0
+
+    def test_sell_sentinel_resolves_to_full_position(self):
+        """qty=-1 sentinel should resolve to actual position size."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=50_000.0)
+        pos = portfolio.open_position("MSFT")
+        pos.add_lot(75, 200.0, date(2020, 1, 2))
+
+        order = Order(symbol="MSFT", side=Side.SELL, quantity=-1,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order)
+
+        market_data = {"MSFT": make_row(open_price=210.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].quantity == 75  # resolved from sentinel to actual qty
+        assert not portfolio.has_position("MSFT")
+
+    def test_buy_cancelled_when_zero_affordable(self):
+        """When cash can't buy even 1 share, order should be cancelled."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=5.0)  # only $5
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=100,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=100.0)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.CANCELLED
+
+    def test_missing_market_data_keeps_order_pending(self):
+        """Order for symbol with no market data should stay pending."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        # No AAPL in market_data
+        market_data = {"MSFT": make_row(open_price=200.0)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.PENDING
+        assert len(broker.pending_orders) == 1
