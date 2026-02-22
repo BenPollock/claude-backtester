@@ -15,9 +15,11 @@ class Order:
     order_type: OrderType
     signal_date: date  # close of this day generated the signal
     limit_price: float | None = None
+    stop_price: float | None = None  # trigger price for STOP/STOP_LIMIT orders
     status: OrderStatus = OrderStatus.PENDING
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     reason: str = ""  # e.g. "overallocation"
+    parent_id: str | None = None  # links bracket children to entry order
 
 
 @dataclass(frozen=True)

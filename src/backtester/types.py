@@ -11,6 +11,8 @@ class Side(Enum):
 class OrderType(Enum):
     MARKET = auto()
     LIMIT = auto()
+    STOP = auto()       # triggers market sell when price <= stop_price
+    STOP_LIMIT = auto() # triggers limit sell when price <= stop_price
 
 
 class OrderStatus(Enum):

@@ -1,7 +1,8 @@
-"""Performance metrics: CAGR, Sharpe, Sortino, Max Drawdown, etc."""
+"""Performance metrics: CAGR, Sharpe, Sortino, Max Drawdown, benchmark-relative, etc."""
 
 import numpy as np
 import pandas as pd
+from statistics import median
 
 
 def cagr(equity_series: pd.Series) -> float:
@@ -107,16 +108,198 @@ def profit_factor(trades) -> float:
     return gross_profit / gross_loss
 
 
-def compute_all_metrics(equity_series: pd.Series, trades, risk_free_rate: float = 0.0) -> dict:
-    """Compute all available metrics and return as a dict."""
+def calmar_ratio(equity_series: pd.Series) -> float:
+    """Calmar Ratio: CAGR / |MaxDD|."""
+    c = cagr(equity_series)
+    dd = max_drawdown(equity_series)
+    if dd == 0:
+        return float("inf") if c > 0 else 0.0
+    return c / abs(dd)
+
+
+def beta(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
+    """Beta: covariance of strategy and benchmark returns / variance of benchmark."""
+    strat_ret = equity_series.pct_change().dropna()
+    bm_ret = benchmark_series.pct_change().dropna()
+    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
+    if len(aligned) < 2:
+        return 0.0
+    cov_matrix = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])
+    bm_var = cov_matrix[1, 1]
+    if bm_var == 0:
+        return 0.0
+    return cov_matrix[0, 1] / bm_var
+
+
+def alpha(equity_series: pd.Series, benchmark_series: pd.Series,
+          risk_free_rate: float = 0.0) -> float:
+    """Jensen's Alpha: annualized excess return vs CAPM prediction."""
+    strat_ret = equity_series.pct_change().dropna()
+    bm_ret = benchmark_series.pct_change().dropna()
+    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
+    if len(aligned) < 2:
+        return 0.0
+    b = beta(equity_series, benchmark_series)
+    daily_rf = risk_free_rate / 252.0
+    mean_strat = aligned.iloc[:, 0].mean()
+    mean_bm = aligned.iloc[:, 1].mean()
+    daily_alpha = mean_strat - daily_rf - b * (mean_bm - daily_rf)
+    return daily_alpha * 252.0
+
+
+def information_ratio(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
+    """Information Ratio: annualized active return / tracking error."""
+    strat_ret = equity_series.pct_change().dropna()
+    bm_ret = benchmark_series.pct_change().dropna()
+    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
+    if len(aligned) < 2:
+        return 0.0
+    active = aligned.iloc[:, 0] - aligned.iloc[:, 1]
+    te = active.std()
+    if te == 0:
+        return 0.0
+    return (active.mean() / te) * np.sqrt(252)
+
+
+def tracking_error(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
+    """Tracking Error: annualized std of active returns."""
+    strat_ret = equity_series.pct_change().dropna()
+    bm_ret = benchmark_series.pct_change().dropna()
+    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
+    if len(aligned) < 2:
+        return 0.0
+    active = aligned.iloc[:, 0] - aligned.iloc[:, 1]
+    return active.std() * np.sqrt(252)
+
+
+def capture_ratio(equity_series: pd.Series, benchmark_series: pd.Series,
+                  side: str = "up") -> float:
+    """Up or Down capture ratio vs benchmark.
+
+    Up capture > 100% means you gain more than the benchmark in up markets.
+    Down capture < 100% means you lose less than the benchmark in down markets.
+    """
+    strat_ret = equity_series.pct_change().dropna()
+    bm_ret = benchmark_series.pct_change().dropna()
+    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
+    if len(aligned) < 2:
+        return 0.0
+    s, b = aligned.iloc[:, 0], aligned.iloc[:, 1]
+    if side == "up":
+        mask = b > 0
+    else:
+        mask = b < 0
+    if mask.sum() == 0:
+        return 0.0
+    return s[mask].mean() / b[mask].mean() * 100.0
+
+
+# ── Trade-level statistics ─────────────────────────────────────────
+
+
+def trade_expectancy(trades) -> float:
+    """Average PnL per trade (expectancy)."""
+    if not trades:
+        return 0.0
+    return sum(t.pnl for t in trades) / len(trades)
+
+
+def avg_win_loss(trades) -> dict:
+    """Average winner and loser PnL, and payoff ratio."""
+    winners = [t for t in trades if t.pnl > 0]
+    losers = [t for t in trades if t.pnl < 0]
+    avg_win = sum(t.pnl for t in winners) / len(winners) if winners else 0.0
+    avg_loss = sum(t.pnl for t in losers) / len(losers) if losers else 0.0
+    payoff = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf") if avg_win > 0 else 0.0
+    return {"avg_win": avg_win, "avg_loss": avg_loss, "payoff_ratio": payoff}
+
+
+def holding_period_stats(trades) -> dict:
+    """Avg/median holding period overall, for winners, and for losers."""
+    if not trades:
+        return {"avg_days": 0, "median_days": 0,
+                "avg_days_winners": 0, "avg_days_losers": 0}
+    all_days = [t.holding_days for t in trades]
+    win_days = [t.holding_days for t in trades if t.pnl > 0]
+    loss_days = [t.holding_days for t in trades if t.pnl < 0]
     return {
+        "avg_days": sum(all_days) / len(all_days),
+        "median_days": median(all_days),
+        "avg_days_winners": sum(win_days) / len(win_days) if win_days else 0,
+        "avg_days_losers": sum(loss_days) / len(loss_days) if loss_days else 0,
+    }
+
+
+def max_consecutive(trades) -> dict:
+    """Max consecutive winners and losers."""
+    if not trades:
+        return {"max_consecutive_wins": 0, "max_consecutive_losses": 0}
+    max_wins = max_losses = 0
+    cur_wins = cur_losses = 0
+    for t in trades:
+        if t.pnl > 0:
+            cur_wins += 1
+            cur_losses = 0
+            max_wins = max(max_wins, cur_wins)
+        elif t.pnl < 0:
+            cur_losses += 1
+            cur_wins = 0
+            max_losses = max(max_losses, cur_losses)
+        else:
+            cur_wins = cur_losses = 0
+    return {"max_consecutive_wins": max_wins, "max_consecutive_losses": max_losses}
+
+
+def exposure_time(equity_series: pd.Series, trades) -> float:
+    """Fraction of trading days where at least one position was open."""
+    if len(equity_series) < 2 or not trades:
+        return 0.0
+    total_days = len(equity_series)
+    # Build set of dates when positions were held
+    invested_dates = set()
+    for t in trades:
+        # Generate business days between entry and exit
+        days = pd.bdate_range(t.entry_date, t.exit_date)
+        invested_dates.update(d.date() for d in days)
+    # Intersect with actual equity dates
+    equity_dates = set(
+        d.date() if hasattr(d, 'date') else d for d in equity_series.index
+    )
+    return len(invested_dates & equity_dates) / total_days
+
+
+def compute_all_metrics(
+    equity_series: pd.Series,
+    trades,
+    risk_free_rate: float = 0.0,
+    benchmark_series: pd.Series | None = None,
+) -> dict:
+    """Compute all available metrics and return as a dict."""
+    m = {
         "total_return": total_return(equity_series),
         "cagr": cagr(equity_series),
         "sharpe_ratio": sharpe_ratio(equity_series, risk_free_rate),
         "sortino_ratio": sortino_ratio(equity_series, risk_free_rate),
+        "calmar_ratio": calmar_ratio(equity_series),
         "max_drawdown": max_drawdown(equity_series),
         "max_drawdown_duration_days": max_drawdown_duration(equity_series),
         "total_trades": len(trades),
         "win_rate": win_rate(trades),
         "profit_factor": profit_factor(trades),
+        "trade_expectancy": trade_expectancy(trades),
+        "exposure_time": exposure_time(equity_series, trades),
+        **avg_win_loss(trades),
+        **holding_period_stats(trades),
+        **max_consecutive(trades),
     }
+
+    # Benchmark-relative metrics (only when benchmark provided)
+    if benchmark_series is not None and len(benchmark_series) >= 2:
+        m["alpha"] = alpha(equity_series, benchmark_series, risk_free_rate)
+        m["beta"] = beta(equity_series, benchmark_series)
+        m["information_ratio"] = information_ratio(equity_series, benchmark_series)
+        m["tracking_error"] = tracking_error(equity_series, benchmark_series)
+        m["up_capture"] = capture_ratio(equity_series, benchmark_series, "up")
+        m["down_capture"] = capture_ratio(equity_series, benchmark_series, "down")
+
+    return m

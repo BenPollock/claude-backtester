@@ -8,7 +8,7 @@ import pandas as pd
 
 from backtester.analytics.metrics import (
     compute_all_metrics, cagr, sharpe_ratio, sortino_ratio, max_drawdown,
-    max_drawdown_duration, total_return,
+    max_drawdown_duration, total_return, calmar_ratio,
 )
 from backtester.engine import BacktestResult
 
@@ -21,6 +21,10 @@ def _print_performance(label: str, equity, final_value: float, metrics: dict) ->
     print(f"CAGR:           {metrics['cagr']:.2%}")
     print(f"Sharpe Ratio:   {metrics['sharpe_ratio']:.2f}")
     print(f"Sortino Ratio:  {metrics['sortino_ratio']:.2f}")
+    cr = metrics.get('calmar_ratio')
+    if cr is not None:
+        cr_str = f"{cr:.2f}" if cr != float("inf") else "inf"
+        print(f"Calmar Ratio:   {cr_str}")
     print(f"Max Drawdown:   {metrics['max_drawdown']:.2%}")
     print(f"Max DD Duration:{metrics['max_drawdown_duration_days']} days")
 
@@ -30,8 +34,9 @@ def print_report(result: BacktestResult) -> dict:
     equity = result.equity_series
     trades = result.trades
     config = result.config
+    bm = result.benchmark_series
 
-    metrics = compute_all_metrics(equity, trades)
+    metrics = compute_all_metrics(equity, trades, benchmark_series=bm)
 
     print("\n" + "=" * 60)
     print("BACKTEST RESULTS")
@@ -48,17 +53,28 @@ def print_report(result: BacktestResult) -> dict:
     _print_performance("Strategy Performance", equity, equity.iloc[-1], metrics)
 
     # Benchmark buy & hold
-    bm = result.benchmark_series
     if bm is not None and len(bm) >= 2:
         bm_metrics = {
             "total_return": total_return(bm),
             "cagr": cagr(bm),
             "sharpe_ratio": sharpe_ratio(bm),
             "sortino_ratio": sortino_ratio(bm),
+            "calmar_ratio": calmar_ratio(bm),
             "max_drawdown": max_drawdown(bm),
             "max_drawdown_duration_days": max_drawdown_duration(bm),
         }
         _print_performance(f"Benchmark Buy & Hold ({config.benchmark})", bm, bm.iloc[-1], bm_metrics)
+
+    # Benchmark-relative metrics
+    if "alpha" in metrics:
+        print(f"\n--- Benchmark-Relative ---")
+        print(f"Alpha (ann.):   {metrics['alpha']:.2%}")
+        print(f"Beta:           {metrics['beta']:.2f}")
+        ir = metrics['information_ratio']
+        print(f"Info Ratio:     {ir:.2f}")
+        print(f"Tracking Error: {metrics['tracking_error']:.2%}")
+        print(f"Up Capture:     {metrics['up_capture']:.1f}%")
+        print(f"Down Capture:   {metrics['down_capture']:.1f}%")
 
     print(f"\n--- Trades ---")
     print(f"Total Trades:   {metrics['total_trades']}")
@@ -66,17 +82,35 @@ def print_report(result: BacktestResult) -> dict:
     pf = metrics['profit_factor']
     pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
     print(f"Profit Factor:  {pf_str}")
+    print(f"Expectancy:     ${metrics['trade_expectancy']:,.2f}")
+    print(f"Exposure Time:  {metrics['exposure_time']:.1%}")
 
     if trades:
         pnls = [t.pnl for t in trades]
         print(f"Avg Trade PnL:  ${sum(pnls) / len(pnls):,.2f}")
         print(f"Best Trade:     ${max(pnls):,.2f}")
         print(f"Worst Trade:    ${min(pnls):,.2f}")
-        holding_days = [t.holding_days for t in trades]
-        print(f"Avg Hold Days:  {sum(holding_days) / len(holding_days):.0f}")
+
+        wl = metrics
+        aw = wl['avg_win']
+        al = wl['avg_loss']
+        pr = wl['payoff_ratio']
+        pr_str = f"{pr:.2f}" if pr != float("inf") else "inf"
+        print(f"Avg Winner:     ${aw:,.2f}")
+        print(f"Avg Loser:      ${al:,.2f}")
+        print(f"Payoff Ratio:   {pr_str}")
+
+        print(f"Avg Hold Days:  {wl['avg_days']:.0f}  (W: {wl['avg_days_winners']:.0f} / L: {wl['avg_days_losers']:.0f})")
+        print(f"Median Hold:    {wl['median_days']} days")
+        print(f"Max Consec Win: {wl['max_consecutive_wins']}")
+        print(f"Max Consec Loss:{wl['max_consecutive_losses']}")
 
     print(f"\nNote: Uses split-adjusted close prices. Dividends not included.")
     print("=" * 60 + "\n")
+
+    # Calendar analytics
+    from backtester.analytics.calendar import print_calendar_report
+    print_calendar_report(equity)
 
     _print_activity_log(result)
 
@@ -120,7 +154,7 @@ def export_activity_log_csv(result: BacktestResult, filepath: str) -> None:
 
 
 def plot_results(result: BacktestResult) -> None:
-    """Show equity curve vs benchmark and drawdown chart."""
+    """Show equity curve vs benchmark, drawdown chart, and monthly heatmap."""
     equity = result.equity_series
     config = result.config
 
@@ -150,3 +184,7 @@ def plot_results(result: BacktestResult) -> None:
 
     fig.tight_layout()
     plt.show()
+
+    # Monthly returns heatmap
+    from backtester.analytics.calendar import plot_monthly_heatmap
+    plot_monthly_heatmap(equity)

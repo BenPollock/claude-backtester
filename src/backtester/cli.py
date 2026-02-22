@@ -8,7 +8,7 @@ import click
 
 # Import to trigger strategy registration
 import backtester.strategies.sma_crossover  # noqa: F401
-from backtester.config import BacktestConfig, RegimeFilter
+from backtester.config import BacktestConfig, RegimeFilter, StopConfig
 from backtester.engine import BacktestEngine
 from backtester.analytics.report import print_report, plot_results, export_activity_log_csv
 from backtester.strategies.registry import list_strategies
@@ -45,9 +45,18 @@ def cli(verbose: bool) -> None:
 @click.option("--regime-fast", default=100, type=int, help="Regime filter fast SMA period")
 @click.option("--regime-slow", default=200, type=int, help="Regime filter slow SMA period")
 @click.option("--export-log", default=None, type=click.Path(), help="Export activity log to CSV file")
+@click.option("--position-sizing", type=click.Choice(["fixed_fractional", "atr", "vol_parity"]), default="fixed_fractional", help="Position sizing model")
+@click.option("--risk-pct", default=0.01, type=float, help="Risk per trade for ATR sizer (e.g. 0.01 = 1%)")
+@click.option("--atr-multiple", default=2.0, type=float, help="ATR multiple for stop distance in ATR sizer")
+@click.option("--stop-loss", default=None, type=float, help="Stop-loss as fraction (e.g. 0.05 = 5%)")
+@click.option("--take-profit", default=None, type=float, help="Take-profit as fraction (e.g. 0.20 = 20%)")
+@click.option("--trailing-stop", default=None, type=float, help="Trailing stop as fraction (e.g. 0.08 = 8%)")
+@click.option("--stop-loss-atr", default=None, type=float, help="Stop-loss in ATR multiples (e.g. 2.0)")
+@click.option("--take-profit-atr", default=None, type=float, help="Take-profit in ATR multiples (e.g. 3.0)")
 def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_positions,
         max_alloc, fee, slippage_bps, params, cache_dir, regime_benchmark, regime_fast,
-        regime_slow, export_log):
+        regime_slow, export_log, position_sizing, risk_pct, atr_multiple,
+        stop_loss, take_profit, trailing_stop, stop_loss_atr, take_profit_atr):
     """Run a backtest."""
     if tickers:
         ticker_list = [t.strip().upper() for t in tickers.split(",")]
@@ -67,6 +76,17 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
             slow_period=regime_slow,
         )
 
+    stop_config = None
+    if any(v is not None for v in [stop_loss, take_profit, trailing_stop,
+                                    stop_loss_atr, take_profit_atr]):
+        stop_config = StopConfig(
+            stop_loss_pct=stop_loss,
+            take_profit_pct=take_profit,
+            trailing_stop_pct=trailing_stop,
+            stop_loss_atr=stop_loss_atr,
+            take_profit_atr=take_profit_atr,
+        )
+
     config = BacktestConfig(
         strategy_name=strategy,
         tickers=ticker_list,
@@ -81,6 +101,10 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
         data_cache_dir=cache_dir,
         strategy_params=strategy_params,
         regime_filter=regime_filter,
+        stop_config=stop_config,
+        position_sizing=position_sizing,
+        sizing_risk_pct=risk_pct,
+        sizing_atr_multiple=atr_multiple,
     )
 
     engine = BacktestEngine(config)
@@ -102,6 +126,105 @@ def list_strats():
     click.echo("Available strategies:")
     for name in strategies:
         click.echo(f"  - {name}")
+
+
+def _build_config(strategy, tickers, market, universe, benchmark, start, end,
+                   cash, max_positions, max_alloc, fee, slippage_bps, params,
+                   cache_dir, **kwargs) -> BacktestConfig:
+    """Shared config builder for run/optimize/walk-forward commands."""
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",")]
+    else:
+        from backtester.data.universe import UniverseProvider
+        provider = UniverseProvider()
+        ticker_list = provider.get_tickers(market=market, universe=universe)
+    strategy_params = json.loads(params)
+
+    return BacktestConfig(
+        strategy_name=strategy,
+        tickers=ticker_list,
+        benchmark=benchmark.upper(),
+        start_date=start.date(),
+        end_date=end.date(),
+        starting_cash=cash,
+        max_positions=max_positions,
+        max_alloc_pct=max_alloc,
+        fee_per_trade=fee,
+        slippage_bps=slippage_bps,
+        data_cache_dir=cache_dir,
+        strategy_params=strategy_params,
+    )
+
+
+@cli.command()
+@click.option("--strategy", required=True, help="Strategy name")
+@click.option("--tickers", required=True, help="Comma-separated ticker symbols")
+@click.option("--benchmark", required=True, help="Benchmark ticker")
+@click.option("--start", required=True, type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--end", required=True, type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--cash", default=10000.0, type=float)
+@click.option("--max-positions", default=100, type=int)
+@click.option("--max-alloc", default=0.10, type=float)
+@click.option("--fee", default=0.05, type=float)
+@click.option("--slippage-bps", default=10.0, type=float)
+@click.option("--params", default="{}", help="Base strategy params JSON")
+@click.option("--cache-dir", default="~/.backtester/cache")
+@click.option("--grid", required=True, help='Param grid as JSON: {"sma_fast":[50,100],"sma_slow":[200,300]}')
+@click.option("--metric", default="sharpe_ratio", help="Metric to optimize (default: sharpe_ratio)")
+@click.option("--market", default="us_ca")
+@click.option("--universe", default="index")
+def optimize(strategy, tickers, benchmark, start, end, cash, max_positions,
+             max_alloc, fee, slippage_bps, params, cache_dir, grid, metric,
+             market, universe):
+    """Run parameter grid search optimization."""
+    from backtester.research.optimizer import grid_search, print_optimization_results
+
+    base_config = _build_config(
+        strategy, tickers, market, universe, benchmark, start, end,
+        cash, max_positions, max_alloc, fee, slippage_bps, params, cache_dir,
+    )
+    param_grid = json.loads(grid)
+    result = grid_search(base_config, param_grid, optimize_metric=metric)
+    print_optimization_results(result)
+
+
+@cli.command("walk-forward")
+@click.option("--strategy", required=True, help="Strategy name")
+@click.option("--tickers", required=True, help="Comma-separated ticker symbols")
+@click.option("--benchmark", required=True, help="Benchmark ticker")
+@click.option("--start", required=True, type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--end", required=True, type=click.DateTime(formats=["%Y-%m-%d"]))
+@click.option("--cash", default=10000.0, type=float)
+@click.option("--max-positions", default=100, type=int)
+@click.option("--max-alloc", default=0.10, type=float)
+@click.option("--fee", default=0.05, type=float)
+@click.option("--slippage-bps", default=10.0, type=float)
+@click.option("--params", default="{}", help="Base strategy params JSON")
+@click.option("--cache-dir", default="~/.backtester/cache")
+@click.option("--grid", required=True, help='Param grid as JSON')
+@click.option("--is-months", default=12, type=int, help="In-sample window months")
+@click.option("--oos-months", default=3, type=int, help="Out-of-sample window months")
+@click.option("--anchored", is_flag=True, help="Use anchored (expanding) IS window")
+@click.option("--metric", default="sharpe_ratio", help="Metric to optimize")
+@click.option("--market", default="us_ca")
+@click.option("--universe", default="index")
+def walk_forward_cmd(strategy, tickers, benchmark, start, end, cash, max_positions,
+                     max_alloc, fee, slippage_bps, params, cache_dir, grid,
+                     is_months, oos_months, anchored, metric, market, universe):
+    """Run walk-forward analysis with rolling optimization windows."""
+    from backtester.research.walk_forward import walk_forward, print_walk_forward_results
+
+    base_config = _build_config(
+        strategy, tickers, market, universe, benchmark, start, end,
+        cash, max_positions, max_alloc, fee, slippage_bps, params, cache_dir,
+    )
+    param_grid = json.loads(grid)
+    result = walk_forward(
+        base_config, param_grid,
+        is_months=is_months, oos_months=oos_months,
+        anchored=anchored, optimize_metric=metric,
+    )
+    print_walk_forward_results(result)
 
 
 if __name__ == "__main__":

@@ -15,12 +15,30 @@ class Lot:
 
 
 @dataclass
+class StopState:
+    """Active stop-loss / take-profit / trailing-stop levels for a position."""
+
+    stop_loss: float | None = None     # absolute price level
+    take_profit: float | None = None   # absolute price level
+    trailing_stop_pct: float | None = None  # e.g. 0.05 = 5% trail
+    trailing_high: float = 0.0         # high-water mark for trailing stop
+
+    @property
+    def trailing_stop_price(self) -> float | None:
+        """Current trailing stop trigger price."""
+        if self.trailing_stop_pct is None or self.trailing_high <= 0:
+            return None
+        return self.trailing_high * (1.0 - self.trailing_stop_pct)
+
+
+@dataclass
 class Position:
     """Holds lots for a single symbol. Sells use FIFO ordering."""
 
     symbol: str
     lots: list[Lot] = field(default_factory=list)
     _market_price: float = 0.0
+    stop_state: StopState = field(default_factory=StopState)
 
     @property
     def total_quantity(self) -> int:

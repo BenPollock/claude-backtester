@@ -23,6 +23,15 @@ INDICATOR_REGISTRY = {
     "stochastic": (ind.stochastic, True),
     "adx": (ind.adx, True),
     "obv": (ind.obv, True),
+    "keltner": (ind.keltner, True),
+    "donchian": (ind.donchian, True),
+    "williams_r": (ind.williams_r, True),
+    "cci": (ind.cci, True),
+    "mfi": (ind.mfi, True),
+    "roc": (ind.roc, False),
+    "psar": (ind.psar, True),
+    "ichimoku": (ind.ichimoku, True),
+    "vwap": (ind.vwap, True),
 }
 
 OPERATORS = {
@@ -52,7 +61,7 @@ def _apply_indicator(df: pd.DataFrame, col_name: str, spec: dict) -> pd.DataFram
         df[f"{col_name}_line"] = macd_line
         df[f"{col_name}_signal"] = signal_line
         df[f"{col_name}_hist"] = histogram
-    elif fn_name == "bollinger":
+    elif fn_name in ("bollinger", "keltner", "donchian"):
         upper, middle, lower = result
         df[f"{col_name}_upper"] = upper
         df[f"{col_name}_middle"] = middle
@@ -61,6 +70,13 @@ def _apply_indicator(df: pd.DataFrame, col_name: str, spec: dict) -> pd.DataFram
         k, d = result
         df[f"{col_name}_k"] = k
         df[f"{col_name}_d"] = d
+    elif fn_name == "ichimoku":
+        tenkan_sen, kijun_sen, senkou_a, senkou_b, chikou = result
+        df[f"{col_name}_tenkan"] = tenkan_sen
+        df[f"{col_name}_kijun"] = kijun_sen
+        df[f"{col_name}_senkou_a"] = senkou_a
+        df[f"{col_name}_senkou_b"] = senkou_b
+        df[f"{col_name}_chikou"] = chikou
     else:
         df[col_name] = result
 
