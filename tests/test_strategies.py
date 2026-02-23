@@ -6,7 +6,10 @@ import pytest
 from datetime import date
 
 from backtester.strategies.registry import get_strategy, list_strategies
-from backtester.strategies.indicators import sma, rsi, macd, bollinger, stochastic, adx, obv
+from backtester.strategies.indicators import (
+    sma, rsi, macd, bollinger, stochastic, adx, obv,
+    ema, atr, keltner, donchian, williams_r, cci, mfi, roc, psar, ichimoku, vwap,
+)
 from backtester.portfolio.portfolio import PortfolioState
 from backtester.portfolio.position import Position
 from backtester.types import SignalAction
@@ -29,6 +32,99 @@ class TestIndicators:
         valid = result.dropna()
         assert (valid >= 0).all()
         assert (valid <= 100).all()
+
+    def test_ema(self):
+        prices = pd.Series([1, 2, 3, 4, 5], dtype=float)
+        result = ema(prices, 3)
+        assert pd.isna(result.iloc[0])
+        assert pd.isna(result.iloc[1])
+        assert not pd.isna(result.iloc[2])
+        assert len(result) == 5
+
+    def test_atr(self):
+        df = make_price_df(days=50)
+        result = atr(df, 14)
+        assert len(result) == 50
+        assert result.iloc[:13].isna().all()
+        valid = result.dropna()
+        assert (valid > 0).all()
+
+    def test_keltner(self):
+        df = make_price_df(days=50)
+        upper, middle, lower = keltner(df, period=20, atr_period=14)
+        valid_idx = upper.dropna().index
+        assert len(valid_idx) > 0
+        assert (upper.loc[valid_idx] > middle.loc[valid_idx]).all()
+        assert (lower.loc[valid_idx] < middle.loc[valid_idx]).all()
+
+    def test_donchian(self):
+        df = make_price_df(days=50)
+        upper, middle, lower = donchian(df, period=20)
+        valid_idx = upper.dropna().index
+        assert len(valid_idx) > 0
+        assert (upper.loc[valid_idx] >= lower.loc[valid_idx]).all()
+
+    def test_williams_r_range(self):
+        df = make_price_df(days=50)
+        result = williams_r(df, 14)
+        valid = result.dropna()
+        assert len(valid) > 0
+        assert (valid >= -100).all()
+        assert (valid <= 0).all()
+
+    def test_cci(self):
+        df = make_price_df(days=50)
+        result = cci(df, 20)
+        assert len(result) == 50
+        assert result.iloc[:19].isna().all()
+        assert not result.dropna().empty
+
+    def test_mfi_range(self):
+        df = make_price_df(days=50)
+        result = mfi(df, 14)
+        valid = result.dropna()
+        assert len(valid) > 0
+        assert (valid >= 0).all()
+        assert (valid <= 100).all()
+
+    def test_roc(self):
+        prices = pd.Series([100, 110, 120, 130, 140], dtype=float)
+        result = roc(prices, 2)
+        assert pd.isna(result.iloc[0])
+        assert pd.isna(result.iloc[1])
+        # roc[2] = (120-100)/100 * 100 = 20.0
+        assert result.iloc[2] == pytest.approx(20.0)
+
+    def test_psar(self):
+        df = make_price_df(days=50)
+        result = psar(df)
+        assert len(result) == 50
+        # SAR should be finite where computed
+        valid = result.dropna()
+        assert len(valid) > 0
+        assert all(pd.notna(v) for v in valid)
+
+    def test_psar_short_data(self):
+        df = make_price_df(days=1)
+        result = psar(df)
+        assert len(result) == 1
+        assert pd.isna(result.iloc[0])
+
+    def test_ichimoku(self):
+        df = make_price_df(days=100)
+        t_sen, k_sen, s_a, s_b, chikou = ichimoku(df)
+        assert len(t_sen) == 100
+        # tenkan warmup = 9 periods
+        assert t_sen.iloc[:8].isna().all()
+        assert not t_sen.iloc[8:].isna().all()
+
+    def test_vwap(self):
+        df = make_price_df(days=50)
+        result = vwap(df, period=20)
+        assert len(result) == 50
+        assert result.iloc[:19].isna().all()
+        valid = result.dropna()
+        assert (valid > 0).all()
 
 
 class TestRegistry:
