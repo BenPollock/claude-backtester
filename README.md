@@ -28,6 +28,134 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+## Examples
+
+### 1. Simplest run — SPY SMA crossover, 10 years
+
+```bash
+backtester run --strategy sma_crossover --tickers SPY --start 2010-01-01 --end 2020-12-31
+```
+
+No benchmark, default cash ($10k), default SMA params. Good for a quick sanity check.
+
+---
+
+### 2. Multi-ticker portfolio with allocation limits
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL,AMZN,NVDA \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --cash 50000 \
+  --max-positions 5 \
+  --max-alloc 0.20
+```
+
+Caps each position at 20% of portfolio, no more than 5 open at once.
+
+---
+
+### 3. Add stop-loss and take-profit
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY,QQQ,IWM \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --stop-loss 0.05 \
+  --take-profit 0.20 \
+  --trailing-stop 0.08
+```
+
+Exit if down 5%, lock in profits if up 20%, or trail with an 8% stop from peak.
+
+---
+
+### 4. ATR-based position sizing with ATR stops
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --position-sizing atr \
+  --risk-pct 0.01 \
+  --stop-loss-atr 2.0 \
+  --take-profit-atr 4.0
+```
+
+Risk 1% of capital per trade. Stop placed 2× ATR from entry, target at 4× ATR.
+
+---
+
+### 5. Regime filter — only buy when market is trending up
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2001-01-01 --end 2023-12-31 \
+  --regime-benchmark SPY \
+  --regime-fast 50 \
+  --regime-slow 200
+```
+
+Suppresses new BUY signals when SPY 50-day SMA is below its 200-day SMA.
+
+---
+
+### 6. Tune strategy parameters with grid search
+
+```bash
+backtester optimize \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2001-01-01 --end 2015-12-31 \
+  --grid '{"sma_fast":[20,50,100],"sma_slow":[100,200,300]}' \
+  --metric sharpe_ratio
+```
+
+Finds the SMA combination with the best Sharpe ratio over the in-sample period.
+
+---
+
+### 7. Walk-forward analysis — validate out-of-sample
+
+```bash
+backtester walk-forward \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2001-01-01 --end 2023-12-31 \
+  --grid '{"sma_fast":[20,50,100],"sma_slow":[100,200,300]}' \
+  --is-months 36 \
+  --oos-months 12
+```
+
+Re-optimizes every 12 months using the prior 3 years of data. Helps detect overfitting.
+
+---
+
+### 8. Export trade log for further analysis
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --start 2010-01-01 --end 2020-12-31 \
+  --export-log trades.csv
+```
+
+Writes a full activity log (entries, exits, fills) to `trades.csv`.
+
+---
+
 ## CLI Commands
 
 ### `backtester run`
