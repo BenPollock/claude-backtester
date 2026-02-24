@@ -156,6 +156,31 @@ Writes a full activity log (entries, exits, fills) to `trades.csv`.
 
 ---
 
+### 9. Rule-based strategy — RSI mean reversion with trend filter
+
+```bash
+backtester run \
+  --strategy rule_based \
+  --tickers SPY,QQQ,IWM \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --cash 30000 \
+  --max-positions 3 \
+  --max-alloc 0.33 \
+  --params '{
+    "indicators": {
+      "rsi":    {"fn": "rsi",  "period": 14},
+      "sma200": {"fn": "sma",  "period": 200}
+    },
+    "buy_when":  [["rsi", "<", 35], ["Close", ">", "sma200"]],
+    "sell_when": [["rsi", ">", 65]]
+  }'
+```
+
+Buy when RSI drops below 35 (oversold) **and** price is above its 200-day SMA (uptrend). Sell when RSI recovers above 65. Rules use AND logic — all conditions must be true to trigger.
+
+---
+
 ## CLI Commands
 
 ### `backtester run`
