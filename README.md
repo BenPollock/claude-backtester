@@ -33,10 +33,10 @@ pip install -e ".[dev]"
 ### 1. Simplest run — SPY SMA crossover, 10 years
 
 ```bash
-backtester run --strategy sma_crossover --tickers SPY --start 2010-01-01 --end 2020-12-31
+backtester run --strategy sma_crossover --tickers SPY --benchmark SPY --start 2010-01-01 --end 2020-12-31
 ```
 
-No benchmark, default cash ($10k), default SMA params. Good for a quick sanity check.
+Default cash ($10k), default SMA params. Good for a quick sanity check.
 
 ---
 
@@ -148,6 +148,7 @@ Re-optimizes every 12 months using the prior 3 years of data. Helps detect overf
 backtester run \
   --strategy sma_crossover \
   --tickers SPY \
+  --benchmark SPY \
   --start 2010-01-01 --end 2020-12-31 \
   --export-log trades.csv
 ```
@@ -200,32 +201,35 @@ backtester run \
   --params '{"sma_fast":100,"sma_slow":200}'
 ```
 
-**Key options:**
+**Options:**
 
-| Option | Description |
-|---|---|
-| `--strategy` | Strategy name (`sma_crossover`, `rule_based`) |
-| `--tickers` | Comma-separated ticker symbols |
-| `--market` | Market scope when tickers omitted (`us`, `ca`, `us_ca`) |
-| `--universe` | Universe breadth (`index`, `all`) |
-| `--benchmark` | Benchmark ticker for comparison |
-| `--start` / `--end` | Date range (YYYY-MM-DD) |
-| `--cash` | Starting capital (default: 10,000) |
-| `--max-positions` | Max concurrent positions |
-| `--max-alloc` | Max allocation per position (e.g. 0.10 = 10%) |
-| `--fee` | Fee per trade in dollars |
-| `--slippage-bps` | Slippage in basis points |
-| `--params` | Strategy parameters as JSON string |
-| `--position-sizing` | Sizing model: `fixed_fractional`, `atr`, `vol_parity` |
-| `--risk-pct` | Risk per trade for ATR sizer (e.g. 0.01 = 1%) |
-| `--stop-loss` | Stop-loss as fraction (e.g. 0.05 = 5%) |
-| `--take-profit` | Take-profit as fraction (e.g. 0.20 = 20%) |
-| `--trailing-stop` | Trailing stop as fraction (e.g. 0.08 = 8%) |
-| `--stop-loss-atr` | Stop-loss in ATR multiples |
-| `--take-profit-atr` | Take-profit in ATR multiples |
-| `--regime-benchmark` | Regime filter benchmark ticker |
-| `--regime-fast` / `--regime-slow` | Regime filter SMA periods |
-| `--export-log` | Export activity log to CSV |
+| Option | Description | Default |
+|---|---|---|
+| `--strategy` | Strategy name (`sma_crossover`, `rule_based`) | **required** |
+| `--tickers` | Comma-separated ticker symbols | uses `--market`/`--universe` |
+| `--market` | Market scope when tickers omitted (`us`, `ca`, `us_ca`) | `us_ca` |
+| `--universe` | Universe breadth (`index`, `all`) | `index` |
+| `--benchmark` | Benchmark ticker for comparison | **required** |
+| `--start` / `--end` | Date range (YYYY-MM-DD) | **required** |
+| `--cash` | Starting capital | `10000` |
+| `--max-positions` | Max concurrent positions | `100` |
+| `--max-alloc` | Max allocation per position (e.g. 0.10 = 10%) | `0.10` |
+| `--fee` | Fee per trade in dollars | `0.05` |
+| `--slippage-bps` | Slippage in basis points | `10.0` |
+| `--params` | Strategy parameters as JSON string | `{}` |
+| `--cache-dir` | Parquet data cache directory | `~/.backtester/cache` |
+| `--position-sizing` | Sizing model: `fixed_fractional`, `atr`, `vol_parity` | `fixed_fractional` |
+| `--risk-pct` | Risk per trade for ATR sizer (e.g. 0.01 = 1%) | `0.01` |
+| `--atr-multiple` | ATR multiple for stop distance in ATR sizer | `2.0` |
+| `--stop-loss` | Stop-loss as fraction (e.g. 0.05 = 5%) | disabled |
+| `--take-profit` | Take-profit as fraction (e.g. 0.20 = 20%) | disabled |
+| `--trailing-stop` | Trailing stop as fraction (e.g. 0.08 = 8%) | disabled |
+| `--stop-loss-atr` | Stop-loss in ATR multiples | disabled |
+| `--take-profit-atr` | Take-profit in ATR multiples | disabled |
+| `--regime-benchmark` | Regime filter benchmark ticker | disabled |
+| `--regime-fast` | Regime filter fast SMA period | `100` |
+| `--regime-slow` | Regime filter slow SMA period | `200` |
+| `--export-log` | Export activity log to CSV | disabled |
 
 ### `backtester optimize`
 
@@ -241,6 +245,26 @@ backtester optimize \
   --grid '{"sma_fast":[50,100,150],"sma_slow":[200,250,300]}' \
   --metric sharpe_ratio
 ```
+
+**Options:**
+
+| Option | Description | Default |
+|---|---|---|
+| `--strategy` | Strategy name | **required** |
+| `--tickers` | Comma-separated ticker symbols | **required** |
+| `--benchmark` | Benchmark ticker | **required** |
+| `--start` / `--end` | Date range (YYYY-MM-DD) | **required** |
+| `--grid` | Parameter grid as JSON (e.g. `{"sma_fast":[50,100]}`) | **required** |
+| `--metric` | Metric to optimize | `sharpe_ratio` |
+| `--cash` | Starting capital | `10000` |
+| `--max-positions` | Max concurrent positions | `100` |
+| `--max-alloc` | Max allocation per position | `0.10` |
+| `--fee` | Fee per trade in dollars | `0.05` |
+| `--slippage-bps` | Slippage in basis points | `10.0` |
+| `--params` | Base strategy params as JSON | `{}` |
+| `--market` | Market scope when tickers omitted | `us_ca` |
+| `--universe` | Universe breadth when tickers omitted | `index` |
+| `--cache-dir` | Parquet data cache directory | `~/.backtester/cache` |
 
 ### `backtester walk-forward`
 
@@ -259,12 +283,28 @@ backtester walk-forward \
   --anchored
 ```
 
-| Option | Description |
-|---|---|
-| `--is-months` | In-sample window length in months |
-| `--oos-months` | Out-of-sample window length in months |
-| `--anchored` | Use expanding (anchored) in-sample window |
-| `--metric` | Metric to optimize (default: `sharpe_ratio`) |
+**Options:**
+
+| Option | Description | Default |
+|---|---|---|
+| `--strategy` | Strategy name | **required** |
+| `--tickers` | Comma-separated ticker symbols | **required** |
+| `--benchmark` | Benchmark ticker | **required** |
+| `--start` / `--end` | Date range (YYYY-MM-DD) | **required** |
+| `--grid` | Parameter grid as JSON | **required** |
+| `--is-months` | In-sample window length in months | `12` |
+| `--oos-months` | Out-of-sample window length in months | `3` |
+| `--anchored` | Use expanding (anchored) in-sample window | `false` |
+| `--metric` | Metric to optimize | `sharpe_ratio` |
+| `--cash` | Starting capital | `10000` |
+| `--max-positions` | Max concurrent positions | `100` |
+| `--max-alloc` | Max allocation per position | `0.10` |
+| `--fee` | Fee per trade in dollars | `0.05` |
+| `--slippage-bps` | Slippage in basis points | `10.0` |
+| `--params` | Base strategy params as JSON | `{}` |
+| `--market` | Market scope when tickers omitted | `us_ca` |
+| `--universe` | Universe breadth when tickers omitted | `index` |
+| `--cache-dir` | Parquet data cache directory | `~/.backtester/cache` |
 
 ### `backtester list-strategies`
 
