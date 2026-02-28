@@ -9,10 +9,10 @@ import pytest
 from backtester.config import BacktestConfig
 from backtester.portfolio.portfolio import Portfolio
 from backtester.data.sources.base import DataSource
+from backtester.strategies.registry import discover_strategies
 
-# Import to register strategies
-import backtester.strategies.sma_crossover  # noqa: F401
-import backtester.strategies.rule_based  # noqa: F401
+# Auto-discover all strategy modules so they register with the registry
+discover_strategies()
 
 
 def make_price_df(

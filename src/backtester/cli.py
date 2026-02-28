@@ -6,12 +6,13 @@ from datetime import date
 
 import click
 
-# Import to trigger strategy registration
-import backtester.strategies.sma_crossover  # noqa: F401
 from backtester.config import BacktestConfig, RegimeFilter, StopConfig
 from backtester.engine import BacktestEngine
 from backtester.analytics.report import print_report, plot_results, export_activity_log_csv
-from backtester.strategies.registry import list_strategies
+from backtester.strategies.registry import discover_strategies, list_strategies
+
+# Auto-discover all strategy modules so they register with the registry
+discover_strategies()
 
 
 @click.group()
@@ -58,53 +59,17 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
         regime_slow, export_log, position_sizing, risk_pct, atr_multiple,
         stop_loss, take_profit, trailing_stop, stop_loss_atr, take_profit_atr):
     """Run a backtest."""
-    if tickers:
-        ticker_list = [t.strip().upper() for t in tickers.split(",")]
-    else:
-        from backtester.data.universe import UniverseProvider
-        provider = UniverseProvider()
-        ticker_list = provider.get_tickers(market=market, universe=universe)
-        click.echo(f"Universe: {len(ticker_list)} tickers ({market}/{universe})")
-    strategy_params = json.loads(params)
-
-    regime_filter = None
-    if regime_benchmark:
-        regime_filter = RegimeFilter(
-            benchmark=regime_benchmark,
-            indicator="sma",
-            fast_period=regime_fast,
-            slow_period=regime_slow,
-        )
-
-    stop_config = None
-    if any(v is not None for v in [stop_loss, take_profit, trailing_stop,
-                                    stop_loss_atr, take_profit_atr]):
-        stop_config = StopConfig(
-            stop_loss_pct=stop_loss,
-            take_profit_pct=take_profit,
-            trailing_stop_pct=trailing_stop,
-            stop_loss_atr=stop_loss_atr,
-            take_profit_atr=take_profit_atr,
-        )
-
-    config = BacktestConfig(
-        strategy_name=strategy,
-        tickers=ticker_list,
-        benchmark=benchmark.upper(),
-        start_date=start.date(),
-        end_date=end.date(),
-        starting_cash=cash,
-        max_positions=max_positions,
-        max_alloc_pct=max_alloc,
-        fee_per_trade=fee,
-        slippage_bps=slippage_bps,
-        data_cache_dir=cache_dir,
-        strategy_params=strategy_params,
-        regime_filter=regime_filter,
-        stop_config=stop_config,
-        position_sizing=position_sizing,
-        sizing_risk_pct=risk_pct,
-        sizing_atr_multiple=atr_multiple,
+    config = _build_config(
+        strategy=strategy, tickers=tickers, market=market, universe=universe,
+        benchmark=benchmark, start=start, end=end, cash=cash,
+        max_positions=max_positions, max_alloc=max_alloc, fee=fee,
+        slippage_bps=slippage_bps, params=params, cache_dir=cache_dir,
+        regime_benchmark=regime_benchmark, regime_fast=regime_fast,
+        regime_slow=regime_slow, position_sizing=position_sizing,
+        risk_pct=risk_pct, atr_multiple=atr_multiple,
+        stop_loss=stop_loss, take_profit=take_profit,
+        trailing_stop=trailing_stop, stop_loss_atr=stop_loss_atr,
+        take_profit_atr=take_profit_atr,
     )
 
     engine = BacktestEngine(config)
@@ -130,7 +95,11 @@ def list_strats():
 
 def _build_config(strategy, tickers, market, universe, benchmark, start, end,
                    cash, max_positions, max_alloc, fee, slippage_bps, params,
-                   cache_dir, **kwargs) -> BacktestConfig:
+                   cache_dir, regime_benchmark=None, regime_fast=100,
+                   regime_slow=200, position_sizing="fixed_fractional",
+                   risk_pct=0.01, atr_multiple=2.0, stop_loss=None,
+                   take_profit=None, trailing_stop=None, stop_loss_atr=None,
+                   take_profit_atr=None, **kwargs) -> BacktestConfig:
     """Shared config builder for run/optimize/walk-forward commands."""
     if tickers:
         ticker_list = [t.strip().upper() for t in tickers.split(",")]
@@ -139,6 +108,26 @@ def _build_config(strategy, tickers, market, universe, benchmark, start, end,
         provider = UniverseProvider()
         ticker_list = provider.get_tickers(market=market, universe=universe)
     strategy_params = json.loads(params)
+
+    regime_filter = None
+    if regime_benchmark:
+        regime_filter = RegimeFilter(
+            benchmark=regime_benchmark,
+            indicator="sma",
+            fast_period=regime_fast,
+            slow_period=regime_slow,
+        )
+
+    stop_config = None
+    if any(v is not None for v in [stop_loss, take_profit, trailing_stop,
+                                    stop_loss_atr, take_profit_atr]):
+        stop_config = StopConfig(
+            stop_loss_pct=stop_loss,
+            take_profit_pct=take_profit,
+            trailing_stop_pct=trailing_stop,
+            stop_loss_atr=stop_loss_atr,
+            take_profit_atr=take_profit_atr,
+        )
 
     return BacktestConfig(
         strategy_name=strategy,
@@ -153,6 +142,11 @@ def _build_config(strategy, tickers, market, universe, benchmark, start, end,
         slippage_bps=slippage_bps,
         data_cache_dir=cache_dir,
         strategy_params=strategy_params,
+        regime_filter=regime_filter,
+        stop_config=stop_config,
+        position_sizing=position_sizing,
+        sizing_risk_pct=risk_pct,
+        sizing_atr_multiple=atr_multiple,
     )
 
 

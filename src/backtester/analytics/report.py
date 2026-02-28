@@ -10,7 +10,7 @@ from backtester.analytics.metrics import (
     compute_all_metrics, cagr, sharpe_ratio, sortino_ratio, max_drawdown,
     max_drawdown_duration, total_return, calmar_ratio,
 )
-from backtester.engine import BacktestResult
+from backtester.result import BacktestResult
 
 
 def _print_performance(label: str, equity, final_value: float, metrics: dict) -> None:

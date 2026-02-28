@@ -47,7 +47,7 @@ class TestSetStopsForFills:
         portfolio.positions["TEST"] = pos
 
         fills = [_make_fill(price=100.0)]
-        engine._set_stops_for_fills(fills, {}, portfolio)
+        engine._stop_mgr.set_stops_for_fills(fills, {}, portfolio)
 
         assert pos.stop_state.stop_loss == pytest.approx(95.0)
 
@@ -59,7 +59,7 @@ class TestSetStopsForFills:
         portfolio.positions["TEST"] = pos
 
         fills = [_make_fill(price=100.0)]
-        engine._set_stops_for_fills(fills, {}, portfolio)
+        engine._stop_mgr.set_stops_for_fills(fills, {}, portfolio)
 
         assert pos.stop_state.take_profit == pytest.approx(120.0)
 
@@ -72,7 +72,7 @@ class TestSetStopsForFills:
 
         today_data = {"TEST": pd.Series({"ATR": 3.0})}
         fills = [_make_fill(price=100.0)]
-        engine._set_stops_for_fills(fills, today_data, portfolio)
+        engine._stop_mgr.set_stops_for_fills(fills, today_data, portfolio)
 
         # stop = 100 - 2.0 * 3.0 = 94.0
         assert pos.stop_state.stop_loss == pytest.approx(94.0)
@@ -88,7 +88,7 @@ class TestSetStopsForFills:
 
         today_data = {"TEST": pd.Series({"ATR": 3.0})}
         fills = [_make_fill(price=100.0)]
-        engine._set_stops_for_fills(fills, today_data, portfolio)
+        engine._stop_mgr.set_stops_for_fills(fills, today_data, portfolio)
 
         assert pos.stop_state.stop_loss == pytest.approx(95.0)
 
@@ -100,7 +100,7 @@ class TestSetStopsForFills:
         portfolio.positions["TEST"] = pos
 
         fills = [_make_fill(price=100.0)]
-        engine._set_stops_for_fills(fills, {}, portfolio)
+        engine._stop_mgr.set_stops_for_fills(fills, {}, portfolio)
 
         assert pos.stop_state.trailing_stop_pct == 0.08
         assert pos.stop_state.trailing_high == 100.0
@@ -109,7 +109,7 @@ class TestSetStopsForFills:
         engine = _make_engine(StopConfig(stop_loss_pct=0.05))
         portfolio = Portfolio(cash=100_000.0)
         fills = [_make_fill(side=Side.SELL)]
-        engine._set_stops_for_fills(fills, {}, portfolio)
+        engine._stop_mgr.set_stops_for_fills(fills, {}, portfolio)
         # No crash, no stops set
 
 
@@ -129,7 +129,7 @@ class TestCheckStopTriggers:
         portfolio = self._setup(ss)
 
         today_data = {"TEST": pd.Series({"Low": 94.0, "High": 101.0, "Close": 95.0})}
-        engine._check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
+        engine._stop_mgr.check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
 
         # Position should be closed
         assert "TEST" not in portfolio.positions
@@ -142,7 +142,7 @@ class TestCheckStopTriggers:
         portfolio = self._setup(ss)
 
         today_data = {"TEST": pd.Series({"Low": 99.0, "High": 121.0, "Close": 119.0})}
-        engine._check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
+        engine._stop_mgr.check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
 
         assert "TEST" not in portfolio.positions
         assert len(portfolio.trade_log) == 1
@@ -154,7 +154,7 @@ class TestCheckStopTriggers:
         portfolio = self._setup(ss)
 
         today_data = {"TEST": pd.Series({"Low": 98.0, "High": 105.0, "Close": 99.0})}
-        engine._check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
+        engine._stop_mgr.check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
 
         assert "TEST" not in portfolio.positions
 
@@ -164,7 +164,7 @@ class TestCheckStopTriggers:
         portfolio = self._setup(ss)
 
         today_data = {"TEST": pd.Series({"Low": 96.0, "High": 110.0, "Close": 105.0})}
-        engine._check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
+        engine._stop_mgr.check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
 
         # Position should still be open
         assert "TEST" in portfolio.positions
@@ -176,7 +176,7 @@ class TestCheckStopTriggers:
         portfolio = self._setup(ss)
 
         today_data = {"TEST": pd.Series({"Low": 94.0, "High": 101.0, "Close": 95.0})}
-        engine._check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
+        engine._stop_mgr.check_stop_triggers(date(2020, 7, 1), today_data, portfolio)
 
         # Sold 100 shares at stop price 95.0, fee=0
         assert portfolio.cash == pytest.approx(9500.0)

@@ -1,3 +1,5 @@
-# Import strategies to trigger @register_strategy decorators
-import backtester.strategies.sma_crossover  # noqa: F401
-import backtester.strategies.rule_based  # noqa: F401
+"""Strategies package -- auto-discovers and registers all strategy modules."""
+
+from backtester.strategies.registry import discover_strategies
+
+discover_strategies()

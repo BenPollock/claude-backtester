@@ -17,42 +17,16 @@ from backtester.execution.fees import PerTradeFee
 from backtester.execution.position_sizing import (
     PositionSizer, FixedFractional, ATRSizer, VolatilityParity,
 )
+from backtester.execution.stops import StopManager
 from backtester.portfolio.portfolio import Portfolio
 from backtester.portfolio.order import Order
-from backtester.portfolio.position import StopState
+from backtester.result import BacktestResult
 from backtester.types import Side, OrderType, SignalAction
 
+# Re-export BacktestResult for backward compatibility
+__all__ = ["BacktestEngine", "BacktestResult"]
+
 logger = logging.getLogger(__name__)
-
-
-class BacktestResult:
-    """Container for backtest outputs."""
-
-    def __init__(self, config: BacktestConfig, portfolio: Portfolio,
-                 benchmark_equity: list[tuple[date, float]] | None = None):
-        self.config = config
-        self.portfolio = portfolio
-        self.benchmark_equity = benchmark_equity
-
-    @property
-    def equity_series(self) -> pd.Series:
-        dates, values = zip(*self.portfolio.equity_history)
-        return pd.Series(values, index=pd.DatetimeIndex(dates, name="Date"), name="Equity")
-
-    @property
-    def benchmark_series(self) -> pd.Series | None:
-        if not self.benchmark_equity:
-            return None
-        dates, values = zip(*self.benchmark_equity)
-        return pd.Series(values, index=pd.DatetimeIndex(dates, name="Date"), name="Benchmark")
-
-    @property
-    def trades(self):
-        return self.portfolio.trade_log
-
-    @property
-    def activity_log(self):
-        return self.portfolio.activity_log
 
 
 class BacktestEngine:
@@ -80,6 +54,7 @@ class BacktestEngine:
 
         fees = PerTradeFee(fee=config.fee_per_trade)
         self._broker = SimulatedBroker(slippage=slippage, fees=fees)
+        self._stop_mgr = StopManager(config.stop_config, fees)
 
         # Set up position sizer
         if config.position_sizing == "atr":
@@ -148,24 +123,21 @@ class BacktestEngine:
 
             # a2. Set stop levels on newly opened positions
             if config.stop_config:
-                self._set_stops_for_fills(fills, today_data, portfolio)
+                self._stop_mgr.set_stops_for_fills(fills, today_data, portfolio)
 
             # a3. Check stop-loss / take-profit / trailing stop triggers using intraday H/L
             if config.stop_config:
-                self._check_stop_triggers(day, today_data, portfolio)
+                self._stop_mgr.check_stop_triggers(day, today_data, portfolio)
 
             # b. Update position market prices to today's close
             for symbol, pos in portfolio.positions.items():
                 row = today_data.get(symbol)
                 if row is not None and not pd.isna(row.get("Close")):
                     pos.update_market_price(row["Close"])
-                    # Update trailing stop high-water mark
-                    if pos.stop_state.trailing_stop_pct is not None:
-                        high = row.get("High", row["Close"])
-                        if not pd.isna(high):
-                            pos.stop_state.trailing_high = max(
-                                pos.stop_state.trailing_high, high
-                            )
+
+            # b2. Update trailing stop high-water marks
+            if config.stop_config:
+                self._stop_mgr.update_trailing_highs(portfolio, today_data)
 
             # c. Record equity
             portfolio.record_equity(day)
@@ -281,120 +253,6 @@ class BacktestEngine:
             return fast > slow
 
         return True  # unknown condition — default to allowing trades
-
-    def _set_stops_for_fills(self, fills, today_data, portfolio):
-        """Set stop-loss/take-profit/trailing-stop on positions that just got a BUY fill."""
-        sc = self.config.stop_config
-        if sc is None:
-            return
-        for fill in fills:
-            if fill.side != Side.BUY:
-                continue
-            pos = portfolio.get_position(fill.symbol)
-            if pos is None:
-                continue
-            entry = fill.price
-            ss = pos.stop_state
-
-            # Percentage-based stops
-            if sc.stop_loss_pct is not None:
-                ss.stop_loss = entry * (1.0 - sc.stop_loss_pct)
-            if sc.take_profit_pct is not None:
-                ss.take_profit = entry * (1.0 + sc.take_profit_pct)
-
-            # ATR-based stops (use ATR column if available)
-            row = today_data.get(fill.symbol)
-            if row is not None:
-                atr_val = row.get("ATR")
-                if atr_val is not None and not pd.isna(atr_val):
-                    if sc.stop_loss_atr is not None:
-                        atr_stop = entry - sc.stop_loss_atr * atr_val
-                        # Use the tighter of pct and ATR stops
-                        if ss.stop_loss is not None:
-                            ss.stop_loss = max(ss.stop_loss, atr_stop)
-                        else:
-                            ss.stop_loss = atr_stop
-                    if sc.take_profit_atr is not None:
-                        atr_target = entry + sc.take_profit_atr * atr_val
-                        if ss.take_profit is not None:
-                            ss.take_profit = min(ss.take_profit, atr_target)
-                        else:
-                            ss.take_profit = atr_target
-
-            # Trailing stop
-            if sc.trailing_stop_pct is not None:
-                ss.trailing_stop_pct = sc.trailing_stop_pct
-                ss.trailing_high = entry  # initialize to entry price
-
-    def _check_stop_triggers(self, day, today_data, portfolio):
-        """Check intraday H/L for stop-loss, take-profit, trailing-stop triggers.
-
-        Uses intraday Low for stop-loss/trailing-stop and High for take-profit
-        to determine if the stop would have been hit during the day.
-        Stop fills use the stop price (not open), which is more realistic.
-        """
-        symbols_to_close = []
-        for symbol, pos in list(portfolio.positions.items()):
-            if pos.total_quantity == 0:
-                continue
-            row = today_data.get(symbol)
-            if row is None:
-                continue
-
-            low = row.get("Low")
-            high = row.get("High")
-            if low is None or high is None or pd.isna(low) or pd.isna(high):
-                continue
-
-            ss = pos.stop_state
-            trigger_price = None
-            reason = ""
-
-            # Check stop-loss (low touches or breaches stop level)
-            if ss.stop_loss is not None and low <= ss.stop_loss:
-                trigger_price = ss.stop_loss
-                reason = "stop_loss"
-
-            # Check trailing stop
-            if trigger_price is None:
-                tsp = ss.trailing_stop_price
-                if tsp is not None and low <= tsp:
-                    trigger_price = tsp
-                    reason = "trailing_stop"
-
-            # Check take-profit (high touches or breaches target)
-            if trigger_price is None:
-                if ss.take_profit is not None and high >= ss.take_profit:
-                    trigger_price = ss.take_profit
-                    reason = "take_profit"
-
-            if trigger_price is not None:
-                symbols_to_close.append((symbol, trigger_price, reason))
-
-        # Execute stop exits immediately (same-day, no T+1 delay for stops)
-        from backtester.portfolio.order import TradeLogEntry
-        for symbol, price, reason in symbols_to_close:
-            pos = portfolio.get_position(symbol)
-            if pos is None or pos.total_quantity == 0:
-                continue
-            qty = pos.total_quantity
-            commission = self._broker._fees.compute(
-                Order(symbol=symbol, side=Side.SELL, quantity=qty,
-                      order_type=OrderType.STOP, signal_date=day),
-                price, qty
-            )
-            avg_cost = pos.avg_entry_price
-            trades = pos.sell_lots_fifo(qty, price, day, commission)
-            portfolio.trade_log.extend(trades)
-            portfolio.cash += price * qty - commission
-            portfolio.activity_log.append(TradeLogEntry(
-                date=day, symbol=symbol, action=Side.SELL,
-                quantity=qty, price=price,
-                value=qty * price, avg_cost_basis=avg_cost,
-                fees=commission, slippage=0.0,
-            ))
-            portfolio.close_position(symbol)
-            logger.debug(f"Stop triggered ({reason}): {symbol} @ {price:.2f}")
 
     def _force_close_all(self, portfolio: Portfolio, last_date: date) -> None:
         """Close all remaining positions at their last known market price."""

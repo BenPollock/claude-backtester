@@ -117,12 +117,26 @@ def calmar_ratio(equity_series: pd.Series) -> float:
     return c / abs(dd)
 
 
-def beta(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
-    """Beta: covariance of strategy and benchmark returns / variance of benchmark."""
+def _aligned_returns(
+    equity_series: pd.Series, benchmark_series: pd.Series
+) -> pd.DataFrame | None:
+    """Compute daily returns for strategy and benchmark, inner-join align them.
+
+    Returns a two-column DataFrame (strategy_returns, benchmark_returns) with
+    matching dates and no NaNs, or None if fewer than 2 overlapping rows exist.
+    """
     strat_ret = equity_series.pct_change().dropna()
     bm_ret = benchmark_series.pct_change().dropna()
     aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
     if len(aligned) < 2:
+        return None
+    return aligned
+
+
+def beta(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
+    """Beta: covariance of strategy and benchmark returns / variance of benchmark."""
+    aligned = _aligned_returns(equity_series, benchmark_series)
+    if aligned is None:
         return 0.0
     cov_matrix = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])
     bm_var = cov_matrix[1, 1]
@@ -134,10 +148,8 @@ def beta(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
 def alpha(equity_series: pd.Series, benchmark_series: pd.Series,
           risk_free_rate: float = 0.0) -> float:
     """Jensen's Alpha: annualized excess return vs CAPM prediction."""
-    strat_ret = equity_series.pct_change().dropna()
-    bm_ret = benchmark_series.pct_change().dropna()
-    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
-    if len(aligned) < 2:
+    aligned = _aligned_returns(equity_series, benchmark_series)
+    if aligned is None:
         return 0.0
     b = beta(equity_series, benchmark_series)
     daily_rf = risk_free_rate / 252.0
@@ -149,10 +161,8 @@ def alpha(equity_series: pd.Series, benchmark_series: pd.Series,
 
 def information_ratio(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
     """Information Ratio: annualized active return / tracking error."""
-    strat_ret = equity_series.pct_change().dropna()
-    bm_ret = benchmark_series.pct_change().dropna()
-    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
-    if len(aligned) < 2:
+    aligned = _aligned_returns(equity_series, benchmark_series)
+    if aligned is None:
         return 0.0
     active = aligned.iloc[:, 0] - aligned.iloc[:, 1]
     te = active.std()
@@ -163,10 +173,8 @@ def information_ratio(equity_series: pd.Series, benchmark_series: pd.Series) -> 
 
 def tracking_error(equity_series: pd.Series, benchmark_series: pd.Series) -> float:
     """Tracking Error: annualized std of active returns."""
-    strat_ret = equity_series.pct_change().dropna()
-    bm_ret = benchmark_series.pct_change().dropna()
-    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
-    if len(aligned) < 2:
+    aligned = _aligned_returns(equity_series, benchmark_series)
+    if aligned is None:
         return 0.0
     active = aligned.iloc[:, 0] - aligned.iloc[:, 1]
     return active.std() * np.sqrt(252)
@@ -179,10 +187,8 @@ def capture_ratio(equity_series: pd.Series, benchmark_series: pd.Series,
     Up capture > 100% means you gain more than the benchmark in up markets.
     Down capture < 100% means you lose less than the benchmark in down markets.
     """
-    strat_ret = equity_series.pct_change().dropna()
-    bm_ret = benchmark_series.pct_change().dropna()
-    aligned = pd.concat([strat_ret, bm_ret], axis=1, join="inner").dropna()
-    if len(aligned) < 2:
+    aligned = _aligned_returns(equity_series, benchmark_series)
+    if aligned is None:
         return 0.0
     s, b = aligned.iloc[:, 0], aligned.iloc[:, 1]
     if side == "up":
