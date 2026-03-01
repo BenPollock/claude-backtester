@@ -1207,6 +1207,91 @@ class TestAnalyticsOutputFlags:
             assert "Signal Decay Analysis" in cli_result.output
             assert "Optimal holding period: 2 days" in cli_result.output
 
+    def test_report_concentration_flag(self, runner):
+        """--report-concentration should call compute_portfolio_concentration and print output."""
+        from backtester.portfolio.position import Position
+
+        portfolio = Portfolio(cash=50_000.0)
+        portfolio.record_equity(date(2020, 1, 2))
+        portfolio.record_equity(date(2020, 1, 3))
+
+        # Add open positions so concentration can be computed
+        pos_spy = Position(symbol="SPY")
+        pos_spy.lots = [MagicMock(quantity=100, cost_basis=300.0)]
+        pos_spy.current_price = 310.0
+        portfolio.positions["SPY"] = pos_spy
+
+        pos_qqq = Position(symbol="QQQ")
+        pos_qqq.lots = [MagicMock(quantity=50, cost_basis=250.0)]
+        pos_qqq.current_price = 260.0
+        portfolio.positions["QQQ"] = pos_qqq
+
+        result_obj = BacktestResult(
+            config=BacktestConfig(
+                strategy_name="sma_crossover", tickers=["SPY", "QQQ"], benchmark="SPY",
+                start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+                starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            ),
+            portfolio=portfolio,
+        )
+
+        mock_conc = {
+            "weights": {"SPY": 0.70, "QQQ": 0.30},
+            "hhi": 0.58,
+            "effective_n": 1.7,
+            "max_weight": 0.70,
+            "max_weight_ticker": "SPY",
+        }
+
+        with patch("backtester.cli.BacktestEngine") as mock_engine_cls, \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"), \
+             patch("backtester.analytics.correlation.compute_portfolio_concentration", return_value=mock_conc) as mock_pc:
+
+            mock_engine = MagicMock()
+            mock_engine.run.return_value = result_obj
+            mock_engine_cls.return_value = mock_engine
+
+            runner = CliRunner()
+            cli_result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY,QQQ",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--report-concentration",
+            ])
+
+            assert cli_result.exit_code == 0, f"CLI failed: {cli_result.output}"
+            mock_pc.assert_called_once()
+            assert "Portfolio Concentration" in cli_result.output
+            assert "HHI:" in cli_result.output
+            assert "Effective N:" in cli_result.output
+
+    def test_report_concentration_no_positions(self, runner, mock_result):
+        """--report-concentration with no open positions should print a message."""
+        with patch("backtester.cli.BacktestEngine") as mock_engine_cls, \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            mock_engine = MagicMock()
+            mock_engine.run.return_value = mock_result
+            mock_engine_cls.return_value = mock_engine
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--report-concentration",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            assert "requires open positions" in result.output
+
 
 class TestCommandParity:
     """Tests that optimize and walk-forward accept the same flags as run."""

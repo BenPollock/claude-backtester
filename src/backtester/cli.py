@@ -91,13 +91,15 @@ def cli(verbose: bool) -> None:
 @click.option("--report-regime", is_flag=True, default=False, help="Print regime performance breakdown")
 @click.option("--report-signal-decay", is_flag=True, default=False, help="Print signal decay analysis")
 @click.option("--report-correlation", is_flag=True, default=False, help="Print correlation matrix")
+@click.option("--report-concentration", is_flag=True, default=False, help="Print portfolio concentration (HHI)")
 def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_positions,
         max_alloc, fee, slippage_bps, params, cache_dir, regime_benchmark, regime_fast,
         regime_slow, regime_condition, export_log, position_sizing, risk_pct, atr_multiple,
         stop_loss, take_profit, trailing_stop, stop_loss_atr, take_profit_atr,
         allow_short, short_borrow_rate, margin_requirement,
         slippage_model, slippage_impact, fee_model, vol_target, vol_lookback,
-        monte_carlo_runs, tearsheet, report_regime, report_signal_decay, report_correlation):
+        monte_carlo_runs, tearsheet, report_regime, report_signal_decay, report_correlation,
+        report_concentration):
     """Run a backtest."""
     config = _build_config(
         strategy=strategy, tickers=tickers, market=market, universe=universe,
@@ -171,6 +173,24 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
             click.echo(corr.to_string())
         else:
             click.echo("Correlation analysis requires at least 2 tickers.")
+
+    if report_concentration:
+        from backtester.analytics.correlation import compute_portfolio_concentration
+        positions = {
+            sym: pos.market_value
+            for sym, pos in result.portfolio.positions.items()
+        }
+        if positions:
+            conc = compute_portfolio_concentration(positions)
+            click.echo("\n=== Portfolio Concentration ===")
+            click.echo(f"HHI:              {conc['hhi']:.3f}")
+            click.echo(f"Effective N:      {conc['effective_n']:.1f}")
+            click.echo(f"Max Weight:       {conc['max_weight']:.2%} ({conc['max_weight_ticker']})")
+            click.echo(f"\nPosition Weights:")
+            for ticker, weight in sorted(conc['weights'].items(), key=lambda x: -x[1]):
+                click.echo(f"  {ticker:<8} {weight:.2%}")
+        else:
+            click.echo("Concentration analysis requires open positions at end of backtest.")
 
     plot_results(result)
 

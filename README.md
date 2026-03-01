@@ -257,31 +257,29 @@ Sizes positions so each contributes roughly equal volatility (10% target annuali
 
 ---
 
-## Python API Examples
+## Advanced Examples
 
-The features below are used via the Python API. Run a backtest first, then pass the result to the analytics modules.
+The examples below cover advanced CLI flag combinations and Python-API-only features (limit orders, multi-timeframe strategies, multi-strategy portfolios).
 
-### 14. Short selling — advanced Python config
+### 14. Short selling with stops and regime filter
 
-> **CLI shortcut:** Use `--allow-short` (see Example 10 above) for basic short selling. The Python API below gives full control over config composition.
-
-```python
-from dataclasses import replace
-from backtester.config import BacktestConfig
-
-# Start from an existing config and enable short selling
-config = replace(
-    base_config,
-    allow_short=True,
-    short_borrow_rate=0.02,    # 2% annualized borrow cost
-    margin_requirement=1.5,    # 150% initial margin
-)
-
-engine = BacktestEngine(config)
-result = engine.run()
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --allow-short \
+  --short-borrow-rate 0.02 \
+  --margin-requirement 1.5 \
+  --stop-loss 0.05 \
+  --take-profit 0.15 \
+  --regime-benchmark SPY \
+  --regime-fast 50 \
+  --regime-slow 200
 ```
 
-Strategies can now return `SignalAction.SHORT` and `SignalAction.COVER`. Short positions have inverted PnL (profit when price falls), FIFO lot tracking, and stop-losses that trigger on price rises.
+Combines short selling (2% borrow cost, 150% margin) with risk management (5% stop-loss, 15% take-profit) and a regime filter. Strategies can return `SignalAction.SHORT` and `SignalAction.COVER`. Short positions have inverted PnL (profit when price falls), FIFO lot tracking, and stop-losses that trigger on price rises.
 
 ---
 
@@ -307,30 +305,43 @@ BUY limit orders fill when the day's Low reaches the limit price. SELL limits fi
 
 ### 16. Realistic fee models — percentage, tiered, and regulatory fees
 
+**Percentage fees** — charge 5 basis points on notional value:
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --fee-model percentage \
+  --fee 5
+```
+
+**Composite US equity fees** — SEC fee + FINRA TAF + broker commission (3 bps):
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --fee-model composite_us \
+  --fee 3
+```
+
+**Tiered fees** — lower rates for larger orders (Python API only, no CLI equivalent):
+
 ```python
-from backtester.execution.fees import (
-    PercentageFee, TieredFee, SECFee, TAFFee, CompositeFee,
-)
+from backtester.execution.fees import TieredFee
 
-# Simple: 5 basis points on notional value
-fee_model = PercentageFee(bps=5)
-
-# Tiered: lower rates for larger orders (marginal brackets)
 fee_model = TieredFee(tiers=[
     (0, 10),        # 0-10k notional: 10 bps
     (10_000, 5),    # 10k-100k: 5 bps
     (100_000, 2),   # 100k+: 2 bps
 ])
-
-# Realistic US equity fee stack
-fee_model = CompositeFee([
-    PercentageFee(bps=3),            # broker commission
-    SECFee(rate_per_million=8.0),    # SEC fee (sells only)
-    TAFFee(per_share=0.000119),      # FINRA TAF (sells only, max $5.95)
-])
 ```
 
-Fee models follow the `FeeModel` ABC. Use `CompositeFee` to stack multiple models — each component's fee is summed.
+Fee models follow the `FeeModel` ABC. Use `CompositeFee` to stack multiple models via the Python API — each component's fee is summed.
 
 ---
 
@@ -365,14 +376,15 @@ The engine automatically resamples daily OHLCV to weekly/monthly bars (Open=firs
 
 ---
 
-### 18. Generate an HTML tearsheet (Python API)
+### 18. Generate an HTML tearsheet
 
-```python
-from backtester.analytics.tearsheet import generate_tearsheet
-
-result = engine.run()
-path = generate_tearsheet(result, output_path="my_tearsheet.html")
-print(f"Tearsheet saved to {path}")
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --tearsheet my_tearsheet.html
 ```
 
 Produces a self-contained HTML file (no external dependencies) with: equity curve, drawdown chart, rolling metrics, monthly returns heatmap, trade statistics, and key metrics table. Open in any browser.
@@ -413,19 +425,13 @@ Each strategy runs independently with its allocated share of capital. The combin
 
 ### 20. Signal decay analysis — find optimal holding period
 
-```python
-from backtester.analytics.signal_decay import signal_decay_summary
-
-result = engine.run()
-decay = signal_decay_summary(result.trades, price_data, max_horizon=20)
-
-print(f"Optimal holding period: {decay['optimal_holding']['optimal_days']} days")
-print(f"Peak return at optimum: {decay['optimal_holding']['peak_return']:.2%}")
-print(f"Signals analyzed: {decay['total_signals']}")
-
-# Average return at each horizon
-for horizon, ret in decay['avg_decay'].items():
-    print(f"  {horizon}: {ret:.4%}")
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --report-signal-decay
 ```
 
 Measures how entry signals perform over T+1 through T+N days. Identifies the horizon where average cumulative return peaks — useful for tuning holding periods.
@@ -434,26 +440,13 @@ Measures how entry signals perform over T+1 through T+N days. Identifies the hor
 
 ### 21. Regime performance breakdown
 
-```python
-from backtester.analytics.regime import regime_summary
-
-result = engine.run()
-summary = regime_summary(
-    equity_curve=result.equity_curve,
-    benchmark_prices=benchmark_close_series,
-    sma_window=200,
-    vol_window=63,
-)
-
-print("Performance by market regime:")
-print(summary["market_regime_perf"])
-#          total_return  annualized_return  volatility  sharpe_ratio  max_drawdown
-# bull          0.45           0.12          0.14        0.86         -0.08
-# bear         -0.15          -0.10          0.25       -0.40         -0.22
-# sideways      0.03           0.02          0.11        0.18         -0.05
-
-print("\nPerformance by volatility regime:")
-print(summary["vol_regime_perf"])
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --report-regime
 ```
 
 Classifies each trading day as bull/bear/sideways (SMA-based) and low/medium/high volatility (rolling realized vol percentiles), then computes return, Sharpe, and drawdown metrics for each regime.
@@ -462,27 +455,17 @@ Classifies each trading day as bull/bear/sideways (SMA-based) and low/medium/hig
 
 ### 22. Correlation and concentration analysis
 
-```python
-from backtester.analytics.correlation import (
-    compute_correlation_matrix,
-    compute_portfolio_concentration,
-    compute_sector_exposure,
-)
-
-# Correlation matrix from OHLCV data
-corr = compute_correlation_matrix(price_data, tickers=["AAPL", "MSFT", "GOOGL"])
-print(corr)
-
-# Portfolio concentration (HHI)
-positions = {"AAPL": 50000, "MSFT": 30000, "GOOGL": 20000}
-conc = compute_portfolio_concentration(positions)
-print(f"HHI: {conc['hhi']:.3f}, Effective N: {conc['effective_n']:.1f}")
-
-# Sector exposure
-sector_map = {"AAPL": "Technology", "MSFT": "Technology", "JPM": "Financials"}
-exposure = compute_sector_exposure(positions, sector_map)
-print(exposure)
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --report-correlation \
+  --report-concentration
 ```
+
+Prints the pairwise return correlation matrix across tickers and portfolio concentration metrics (HHI, effective N, position weights). Sector exposure analysis (`compute_sector_exposure`) requires a user-supplied sector map and is available via the Python API only.
 
 ---
 
