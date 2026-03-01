@@ -148,7 +148,11 @@ class RuleBasedStrategy(Strategy):
         _validate_rules(self._buy_rules, "buy_when")
         _validate_rules(self._sell_rules, "sell_when")
 
-    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+    def compute_indicators(
+        self,
+        df: pd.DataFrame,
+        timeframe_data: dict[str, pd.DataFrame] | None = None,
+    ) -> pd.DataFrame:
         df = df.copy()
         for col_name, spec in self._indicator_specs.items():
             df = _apply_indicator(df, col_name, spec)

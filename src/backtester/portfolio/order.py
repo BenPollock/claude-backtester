@@ -16,6 +16,9 @@ class Order:
     signal_date: date  # close of this day generated the signal
     limit_price: float | None = None
     stop_price: float | None = None  # trigger price for STOP/STOP_LIMIT orders
+    time_in_force: str = "DAY"  # "DAY" (expires end of day) or "GTC" (good-til-cancelled)
+    expiry_date: date | None = None  # optional explicit expiry for GTC orders
+    days_pending: int = 0  # how many days the order has been waiting to fill
     status: OrderStatus = OrderStatus.PENDING
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     reason: str = ""  # e.g. "overallocation"

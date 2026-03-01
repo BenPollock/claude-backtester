@@ -25,3 +25,5 @@ class SignalAction(Enum):
     BUY = auto()
     SELL = auto()
     HOLD = auto()
+    SHORT = auto()
+    COVER = auto()

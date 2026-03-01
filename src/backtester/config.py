@@ -51,3 +51,6 @@ class BacktestConfig:
     position_sizing: str = "fixed_fractional"  # "fixed_fractional", "atr", "vol_parity"
     sizing_risk_pct: float = 0.01  # for ATR sizer: risk 1% of equity per trade
     sizing_atr_multiple: float = 2.0  # for ATR sizer: stop distance in ATR units
+    allow_short: bool = False  # master switch for short selling
+    short_borrow_rate: float = 0.02  # annualized borrow cost rate (2% default)
+    margin_requirement: float = 1.5  # initial margin requirement (150%)

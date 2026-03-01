@@ -15,6 +15,7 @@ class PortfolioState:
     total_equity: float
     num_positions: int
     position_symbols: frozenset[str]
+    margin_used: float = 0.0
 
 
 @dataclass
@@ -34,12 +35,31 @@ class Portfolio:
     def num_positions(self) -> int:
         return len(self.positions)
 
+    @property
+    def margin_used(self) -> float:
+        """Sum of abs(market_value) for short positions.
+
+        This is the raw short exposure before applying the margin
+        requirement multiplier.  The engine multiplies by
+        ``config.margin_requirement`` to get the actual margin reserved.
+        """
+        return sum(
+            abs(pos.market_value)
+            for pos in self.positions.values()
+            if pos.is_short
+        )
+
+    def available_capital(self, margin_requirement: float = 1.5) -> float:
+        """Cash minus margin reserved for short positions."""
+        return self.cash - self.margin_used * margin_requirement
+
     def snapshot(self) -> PortfolioState:
         return PortfolioState(
             cash=self.cash,
             total_equity=self.total_equity,
             num_positions=self.num_positions,
             position_symbols=frozenset(self.positions.keys()),
+            margin_used=self.margin_used,
         )
 
     def record_equity(self, current_date: date) -> None:
@@ -58,7 +78,7 @@ class Portfolio:
         return self.positions[symbol]
 
     def close_position(self, symbol: str) -> None:
-        """Remove a position after all lots are sold."""
+        """Remove a position after all lots are sold/covered."""
         if symbol in self.positions and self.positions[symbol].total_quantity == 0:
             del self.positions[symbol]
 

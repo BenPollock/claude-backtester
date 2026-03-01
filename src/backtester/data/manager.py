@@ -12,6 +12,81 @@ from backtester.data.sources.yahoo import YahooDataSource
 
 logger = logging.getLogger(__name__)
 
+# Supported resampling timeframes beyond daily
+_RESAMPLE_RULES = {
+    "weekly": "W",
+    "monthly": "ME",
+}
+
+
+def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Resample daily OHLCV data to a lower frequency (weekly or monthly).
+
+    Applies proper OHLCV aggregation rules:
+        Open  = first non-NaN value in the period
+        High  = max of the period
+        Low   = min of the period
+        Close = last non-NaN value in the period
+        Volume = sum of the period
+
+    The resulting index uses the last trading day of each period (not the
+    calendar period-end) so it aligns cleanly with daily trading dates.
+
+    Partial periods at the start or end of the data are included.
+
+    Args:
+        df: Daily OHLCV DataFrame with a DatetimeIndex.
+        timeframe: One of 'weekly' or 'monthly'.
+
+    Returns:
+        Resampled DataFrame indexed by the period's last trading day.
+
+    Raises:
+        ValueError: If timeframe is not 'weekly' or 'monthly'.
+    """
+    if timeframe not in _RESAMPLE_RULES:
+        raise ValueError(
+            f"Unsupported timeframe '{timeframe}'. Choose from: {sorted(_RESAMPLE_RULES)}"
+        )
+
+    df = df.copy()
+    rule = _RESAMPLE_RULES[timeframe]
+
+    agg_rules = {
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }
+
+    resampled = df.resample(rule).agg(agg_rules).dropna(subset=["Close"])
+
+    # Replace the period-end calendar date with the actual last trading day
+    # in each period so the index aligns with daily trading dates.
+    last_trading_days = df.resample(rule).apply(lambda x: x.index[-1] if len(x) > 0 else None)
+    # last_trading_days is a Series; use the non-null entries as the new index
+    if "Close" in last_trading_days.columns:
+        # resample().apply on a DataFrame returns a DataFrame; use any column
+        new_index = last_trading_days["Close"].dropna()
+    else:
+        new_index = last_trading_days.dropna()
+
+    # Build mapping from period-end date to last trading day
+    new_idx = []
+    for period_end in resampled.index:
+        # Find the last trading day <= period_end in the original data
+        mask = df.index <= period_end
+        if mask.any():
+            new_idx.append(df.index[mask][-1])
+        else:
+            new_idx.append(period_end)
+
+    resampled.index = pd.DatetimeIndex(new_idx)
+    resampled.index.name = df.index.name
+
+    return resampled
+
 # Max consecutive NaN trading days before we stop forward-filling
 MAX_FFILL_DAYS = 5
 

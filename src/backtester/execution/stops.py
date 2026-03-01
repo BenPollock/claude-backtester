@@ -76,13 +76,44 @@ class StopManager:
                 ss.trailing_stop_pct = sc.trailing_stop_pct
                 ss.trailing_high = entry  # initialize to entry price
 
+    def set_stops_for_short_fills(self, fills, today_data: dict[str, pd.Series],
+                                  portfolio: Portfolio) -> None:
+        """Set stop-loss/take-profit on positions that just got a SHORT fill.
+
+        For short positions the stop directions are inverted:
+        - stop_loss triggers when price RISES above the stop level
+        - take_profit triggers when price FALLS below the target level
+        """
+        sc = self._config
+        if sc is None:
+            return
+        for fill in fills:
+            if fill.side != Side.SELL:
+                continue
+            pos = portfolio.get_position(fill.symbol)
+            if pos is None or not pos.is_short:
+                continue
+            entry = fill.price
+            ss = pos.stop_state
+
+            # For shorts: stop_loss is ABOVE entry (price rises = loss)
+            if sc.stop_loss_pct is not None:
+                ss.stop_loss = entry * (1.0 + sc.stop_loss_pct)
+            # For shorts: take_profit is BELOW entry (price falls = profit)
+            if sc.take_profit_pct is not None:
+                ss.take_profit = entry * (1.0 - sc.take_profit_pct)
+
     def check_stop_triggers(self, day: date, today_data: dict[str, pd.Series],
                             portfolio: Portfolio) -> None:
         """Check intraday H/L for stop-loss, take-profit, trailing-stop triggers.
 
-        Uses intraday Low for stop-loss/trailing-stop and High for take-profit
-        to determine if the stop would have been hit during the day.
-        Stop fills use the stop price (not open), which is more realistic.
+        For long positions:
+        - stop_loss/trailing_stop trigger when Low <= stop level
+        - take_profit triggers when High >= target level
+
+        For short positions:
+        - stop_loss triggers when High >= stop level (price rises against us)
+        - take_profit triggers when Low <= target level (price falls in our favor)
         """
         symbols_to_close: list[tuple[str, float, str]] = []
         for symbol, pos in list(portfolio.positions.items()):
@@ -101,23 +132,36 @@ class StopManager:
             trigger_price = None
             reason = ""
 
-            # Check stop-loss (low touches or breaches stop level)
-            if ss.stop_loss is not None and low <= ss.stop_loss:
-                trigger_price = ss.stop_loss
-                reason = "stop_loss"
+            if pos.is_short:
+                # Short position: stop_loss triggers on HIGH (price rises)
+                if ss.stop_loss is not None and high >= ss.stop_loss:
+                    trigger_price = ss.stop_loss
+                    reason = "stop_loss"
 
-            # Check trailing stop
-            if trigger_price is None:
-                tsp = ss.trailing_stop_price
-                if tsp is not None and low <= tsp:
-                    trigger_price = tsp
-                    reason = "trailing_stop"
+                # Short position: take_profit triggers on LOW (price falls)
+                if trigger_price is None:
+                    if ss.take_profit is not None and low <= ss.take_profit:
+                        trigger_price = ss.take_profit
+                        reason = "take_profit"
+            else:
+                # Long position: original logic
+                # Check stop-loss (low touches or breaches stop level)
+                if ss.stop_loss is not None and low <= ss.stop_loss:
+                    trigger_price = ss.stop_loss
+                    reason = "stop_loss"
 
-            # Check take-profit (high touches or breaches target)
-            if trigger_price is None:
-                if ss.take_profit is not None and high >= ss.take_profit:
-                    trigger_price = ss.take_profit
-                    reason = "take_profit"
+                # Check trailing stop
+                if trigger_price is None:
+                    tsp = ss.trailing_stop_price
+                    if tsp is not None and low <= tsp:
+                        trigger_price = tsp
+                        reason = "trailing_stop"
+
+                # Check take-profit (high touches or breaches target)
+                if trigger_price is None:
+                    if ss.take_profit is not None and high >= ss.take_profit:
+                        trigger_price = ss.take_profit
+                        reason = "take_profit"
 
             if trigger_price is not None:
                 symbols_to_close.append((symbol, trigger_price, reason))
@@ -127,24 +171,47 @@ class StopManager:
             pos = portfolio.get_position(symbol)
             if pos is None or pos.total_quantity == 0:
                 continue
-            qty = pos.total_quantity
-            commission = self._fees.compute(
-                Order(symbol=symbol, side=Side.SELL, quantity=qty,
-                      order_type=OrderType.STOP, signal_date=day),
-                price, qty
-            )
-            avg_cost = pos.avg_entry_price
-            trades = pos.sell_lots_fifo(qty, price, day, commission)
-            portfolio.trade_log.extend(trades)
-            portfolio.cash += price * qty - commission
-            portfolio.activity_log.append(TradeLogEntry(
-                date=day, symbol=symbol, action=Side.SELL,
-                quantity=qty, price=price,
-                value=qty * price, avg_cost_basis=avg_cost,
-                fees=commission, slippage=0.0,
-            ))
-            portfolio.close_position(symbol)
-            logger.debug(f"Stop triggered ({reason}): {symbol} @ {price:.2f}")
+
+            if pos.is_short:
+                # Cover the short position
+                qty = abs(pos.total_quantity)
+                commission = self._fees.compute(
+                    Order(symbol=symbol, side=Side.BUY, quantity=qty,
+                          order_type=OrderType.STOP, signal_date=day),
+                    price, qty
+                )
+                avg_cost = pos.avg_entry_price
+                trades = pos.close_lots_fifo(qty, price, day, commission)
+                portfolio.trade_log.extend(trades)
+                portfolio.cash -= price * qty + commission  # pay to buy back
+                portfolio.activity_log.append(TradeLogEntry(
+                    date=day, symbol=symbol, action=Side.BUY,
+                    quantity=qty, price=price,
+                    value=qty * price, avg_cost_basis=avg_cost,
+                    fees=commission, slippage=0.0,
+                ))
+                portfolio.close_position(symbol)
+                logger.debug(f"Short stop triggered ({reason}): {symbol} @ {price:.2f}")
+            else:
+                # Close the long position (original logic)
+                qty = pos.total_quantity
+                commission = self._fees.compute(
+                    Order(symbol=symbol, side=Side.SELL, quantity=qty,
+                          order_type=OrderType.STOP, signal_date=day),
+                    price, qty
+                )
+                avg_cost = pos.avg_entry_price
+                trades = pos.sell_lots_fifo(qty, price, day, commission)
+                portfolio.trade_log.extend(trades)
+                portfolio.cash += price * qty - commission
+                portfolio.activity_log.append(TradeLogEntry(
+                    date=day, symbol=symbol, action=Side.SELL,
+                    quantity=qty, price=price,
+                    value=qty * price, avg_cost_basis=avg_cost,
+                    fees=commission, slippage=0.0,
+                ))
+                portfolio.close_position(symbol)
+                logger.debug(f"Stop triggered ({reason}): {symbol} @ {price:.2f}")
 
     def update_trailing_highs(self, portfolio: Portfolio,
                               today_data: dict[str, pd.Series]) -> None:

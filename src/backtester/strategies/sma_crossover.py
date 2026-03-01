@@ -30,7 +30,11 @@ class SmaCrossover(Strategy):
         if self.sma_fast >= self.sma_slow:
             raise ValueError(f"sma_fast ({self.sma_fast}) must be < sma_slow ({self.sma_slow})")
 
-    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+    def compute_indicators(
+        self,
+        df: pd.DataFrame,
+        timeframe_data: dict[str, pd.DataFrame] | None = None,
+    ) -> pd.DataFrame:
         df = df.copy()
         df["sma_fast"] = sma(df["Close"], self.sma_fast)
         df["sma_slow"] = sma(df["Close"], self.sma_slow)

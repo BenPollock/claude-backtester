@@ -6,9 +6,9 @@ from datetime import date
 import pandas as pd
 
 from backtester.config import BacktestConfig
-from backtester.data.manager import DataManager
+from backtester.data.manager import DataManager, resample_ohlcv
 from backtester.data.calendar import TradingCalendar
-from backtester.strategies.base import Strategy
+from backtester.strategies.base import Signal, Strategy
 from backtester.strategies.registry import get_strategy
 from backtester.strategies.indicators import sma
 from backtester.execution.broker import SimulatedBroker
@@ -82,10 +82,37 @@ class BacktestEngine:
         if not universe_data:
             raise RuntimeError("No data loaded for any ticker")
 
-        # 3. Compute indicators per ticker
+        # 3. Resample data for multi-timeframe strategies and compute indicators
+        extra_timeframes = [tf for tf in strategy.timeframes if tf != "daily"]
+
+        # Build per-symbol timeframe_data dicts (resampled + forward-filled to daily index)
+        symbol_tf_data: dict[str, dict[str, pd.DataFrame]] = {}
+        if extra_timeframes:
+            logger.info(f"Resampling data for timeframes: {extra_timeframes}")
+            for symbol, daily_df in universe_data.items():
+                tf_map: dict[str, pd.DataFrame] = {}
+                for tf in extra_timeframes:
+                    resampled = resample_ohlcv(daily_df, tf)
+                    # Forward-fill resampled data onto the daily index so
+                    # strategies can look up the current period value for any day.
+                    ff = resampled.reindex(daily_df.index).ffill()
+                    tf_map[tf] = ff
+                symbol_tf_data[symbol] = tf_map
+
         logger.info("Computing indicators...")
         for symbol in list(universe_data.keys()):
-            universe_data[symbol] = strategy.compute_indicators(universe_data[symbol])
+            tf_data = symbol_tf_data.get(symbol) if extra_timeframes else None
+            universe_data[symbol] = strategy.compute_indicators(
+                universe_data[symbol], timeframe_data=tf_data
+            )
+
+            # Merge forward-filled timeframe columns into the daily DataFrame
+            # with a prefix (e.g. "weekly_Close") so generate_signals() can
+            # access multi-timeframe values directly from the daily row.
+            if tf_data:
+                for tf_name, tf_df in tf_data.items():
+                    for col in tf_df.columns:
+                        universe_data[symbol][f"{tf_name}_{col}"] = tf_df[col]
 
         # 4. Load benchmark
         benchmark_data = None
@@ -135,6 +162,12 @@ class BacktestEngine:
                 if row is not None and not pd.isna(row.get("Close")):
                     pos.update_market_price(row["Close"])
 
+            # b1. Accrue short borrow costs (after market price update)
+            if config.allow_short and config.short_borrow_rate > 0:
+                for symbol, pos in portfolio.positions.items():
+                    if pos.is_short:
+                        pos.accrue_borrow_cost(config.short_borrow_rate)
+
             # b2. Update trailing stop high-water marks
             if config.stop_config:
                 self._stop_mgr.update_trailing_highs(portfolio, today_data)
@@ -169,13 +202,38 @@ class BacktestEngine:
                         continue
 
                     position = portfolio.get_position(symbol)
-                    signal = strategy.generate_signals(
+                    raw_signal = strategy.generate_signals(
                         symbol, row, position, portfolio_state, benchmark_row
                     )
+
+                    # Unwrap Signal object to extract action and limit params
+                    if isinstance(raw_signal, Signal):
+                        signal = raw_signal.action
+                        limit_price = raw_signal.limit_price
+                        time_in_force = raw_signal.time_in_force
+                        expiry_date = raw_signal.expiry_date
+                    else:
+                        signal = raw_signal
+                        limit_price = None
+                        time_in_force = "DAY"
+                        expiry_date = None
 
                     # Regime filter: suppress BUY signals when regime is off
                     if signal == SignalAction.BUY and not regime_on:
                         signal = SignalAction.HOLD
+
+                    # Regime filter: optionally suppress SHORT signals too
+                    if signal == SignalAction.SHORT and not regime_on:
+                        signal = SignalAction.HOLD
+
+                    # Reject SHORT signals if short selling is disabled
+                    if signal == SignalAction.SHORT and not config.allow_short:
+                        signal = SignalAction.HOLD
+
+                    # Reject COVER if no short position exists
+                    if signal == SignalAction.COVER:
+                        if position is None or not position.is_short:
+                            signal = SignalAction.HOLD
 
                     if signal == SignalAction.HOLD:
                         continue
@@ -187,6 +245,13 @@ class BacktestEngine:
                         if symbol in portfolio_state.position_symbols:
                             continue  # already have a position
 
+                    # Check position limits for SHORT
+                    if signal == SignalAction.SHORT:
+                        if portfolio_state.num_positions >= config.max_positions:
+                            continue
+                        if symbol in portfolio_state.position_symbols:
+                            continue  # already have a position (long or short)
+
                     # Size the order
                     if signal == SignalAction.BUY:
                         qty = self._sizer.compute(
@@ -195,7 +260,13 @@ class BacktestEngine:
                             portfolio_state.cash,
                             config.max_alloc_pct,
                         )
+                    elif signal == SignalAction.SHORT:
+                        # Use strategy's size_order for SHORT (returns negative qty)
+                        qty = strategy.size_order(
+                            symbol, signal, row, portfolio_state, config.max_alloc_pct
+                        )
                     else:
+                        # SELL or COVER
                         qty = strategy.size_order(
                             symbol, signal, row, portfolio_state, config.max_alloc_pct
                         )
@@ -203,13 +274,37 @@ class BacktestEngine:
                     if qty == 0:
                         continue
 
-                    side = Side.BUY if signal == SignalAction.BUY else Side.SELL
+                    # Map signal to Side and construct order
+                    if signal == SignalAction.BUY:
+                        side = Side.BUY
+                        reason = ""
+                    elif signal == SignalAction.SELL:
+                        side = Side.SELL
+                        reason = ""
+                    elif signal == SignalAction.SHORT:
+                        side = Side.SELL
+                        reason = "short_entry"
+                        qty = abs(qty)  # broker expects positive qty for short entry
+                    elif signal == SignalAction.COVER:
+                        side = Side.BUY
+                        reason = "cover"
+                        # qty is -1 sentinel; broker will resolve
+                    else:
+                        continue
+
+                    # Determine order type based on limit_price
+                    order_type = OrderType.LIMIT if limit_price is not None else OrderType.MARKET
+
                     order = Order(
                         symbol=symbol,
                         side=side,
                         quantity=qty,
-                        order_type=OrderType.MARKET,
+                        order_type=order_type,
                         signal_date=day,
+                        limit_price=limit_price,
+                        time_in_force=time_in_force,
+                        expiry_date=expiry_date,
+                        reason=reason,
                     )
                     self._broker.submit_order(order)
 
@@ -259,10 +354,21 @@ class BacktestEngine:
         for symbol in list(portfolio.positions.keys()):
             pos = portfolio.positions[symbol]
             if pos.total_quantity > 0:
+                # Long position: sell at market price
                 price = pos._market_price
                 if price > 0:
                     trades = pos.sell_lots_fifo(pos.total_quantity, price, last_date, 0.0)
                     portfolio.trade_log.extend(trades)
                     portfolio.cash += price * sum(t.quantity for t in trades)
                     portfolio.close_position(symbol)
-                    logger.debug(f"Force-closed {symbol}: {len(trades)} lots")
+                    logger.debug(f"Force-closed long {symbol}: {len(trades)} lots")
+            elif pos.total_quantity < 0:
+                # Short position: cover at market price
+                price = pos._market_price
+                if price > 0:
+                    cover_qty = abs(pos.total_quantity)
+                    trades = pos.close_lots_fifo(cover_qty, price, last_date, 0.0)
+                    portfolio.trade_log.extend(trades)
+                    portfolio.cash -= price * cover_qty  # pay to buy back
+                    portfolio.close_position(symbol)
+                    logger.debug(f"Force-closed short {symbol}: {len(trades)} lots")
