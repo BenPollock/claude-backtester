@@ -187,11 +187,83 @@ Buy when RSI drops below 35 (oversold) **and** price is above its 200-day SMA (u
 
 ---
 
+### 10. Short selling via CLI
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --allow-short \
+  --short-borrow-rate 0.02 \
+  --margin-requirement 1.5
+```
+
+Enables SHORT/COVER signals from the strategy. Borrow cost is 2% annualized, margin requirement is 150%. Short positions profit when price falls, and stop-losses trigger on price rises.
+
+---
+
+### 11. Generate an HTML tearsheet with analytics
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --tearsheet report.html \
+  --report-regime \
+  --report-signal-decay \
+  --report-correlation
+```
+
+Produces a self-contained HTML tearsheet plus console output for regime breakdown, signal decay analysis, and correlation matrix.
+
+---
+
+### 12. Volume slippage + percentage fees
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --slippage-model volume \
+  --slippage-impact 0.1 \
+  --fee-model percentage \
+  --fee 5
+```
+
+Uses a volume-impact slippage model and charges 5 basis points per trade. Alternatively, `--fee-model composite_us` applies a realistic SEC + FINRA TAF fee stack.
+
+---
+
+### 13. Volatility parity position sizing
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL,AMZN \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --position-sizing vol_parity \
+  --vol-target 0.10 \
+  --vol-lookback 20
+```
+
+Sizes positions so each contributes roughly equal volatility (10% target annualized), using a 20-day lookback for realized volatility.
+
+---
+
 ## Python API Examples
 
 The features below are used via the Python API. Run a backtest first, then pass the result to the analytics modules.
 
-### 10. Short selling — enable in config
+### 14. Short selling — advanced Python config
+
+> **CLI shortcut:** Use `--allow-short` (see Example 10 above) for basic short selling. The Python API below gives full control over config composition.
 
 ```python
 from dataclasses import replace
@@ -213,7 +285,7 @@ Strategies can now return `SignalAction.SHORT` and `SignalAction.COVER`. Short p
 
 ---
 
-### 11. Limit orders — use Signal dataclass in custom strategies
+### 15. Limit orders — use Signal dataclass in custom strategies
 
 ```python
 from backtester.strategies.base import Signal
@@ -233,7 +305,7 @@ BUY limit orders fill when the day's Low reaches the limit price. SELL limits fi
 
 ---
 
-### 12. Realistic fee models — percentage, tiered, and regulatory fees
+### 16. Realistic fee models — percentage, tiered, and regulatory fees
 
 ```python
 from backtester.execution.fees import (
@@ -262,7 +334,7 @@ Fee models follow the `FeeModel` ABC. Use `CompositeFee` to stack multiple model
 
 ---
 
-### 13. Multi-timeframe strategy — weekly trend + daily entry
+### 17. Multi-timeframe strategy — weekly trend + daily entry
 
 ```python
 class WeeklyTrendDaily(Strategy):
@@ -293,7 +365,7 @@ The engine automatically resamples daily OHLCV to weekly/monthly bars (Open=firs
 
 ---
 
-### 14. Generate an HTML tearsheet
+### 18. Generate an HTML tearsheet (Python API)
 
 ```python
 from backtester.analytics.tearsheet import generate_tearsheet
@@ -307,7 +379,7 @@ Produces a self-contained HTML file (no external dependencies) with: equity curv
 
 ---
 
-### 15. Multi-strategy portfolio — run strategies side by side
+### 19. Multi-strategy portfolio — run strategies side by side
 
 ```python
 from backtester.research.multi_strategy import (
@@ -339,7 +411,7 @@ Each strategy runs independently with its allocated share of capital. The combin
 
 ---
 
-### 16. Signal decay analysis — find optimal holding period
+### 20. Signal decay analysis — find optimal holding period
 
 ```python
 from backtester.analytics.signal_decay import signal_decay_summary
@@ -360,7 +432,7 @@ Measures how entry signals perform over T+1 through T+N days. Identifies the hor
 
 ---
 
-### 17. Regime performance breakdown
+### 21. Regime performance breakdown
 
 ```python
 from backtester.analytics.regime import regime_summary
@@ -388,7 +460,7 @@ Classifies each trading day as bull/bear/sideways (SMA-based) and low/medium/hig
 
 ---
 
-### 18. Correlation and concentration analysis
+### 22. Correlation and concentration analysis
 
 ```python
 from backtester.analytics.correlation import (
@@ -416,6 +488,8 @@ print(exposure)
 
 ## CLI Commands
 
+All commands support `--verbose` / `-v` for debug logging.
+
 ### `backtester run`
 
 Run a single backtest.
@@ -437,6 +511,7 @@ backtester run \
 
 | Option | Description | Default |
 |---|---|---|
+| **Core** | | |
 | `--strategy` | Strategy name (`sma_crossover`, `rule_based`) | **required** |
 | `--tickers` | Comma-separated ticker symbols | uses `--market`/`--universe` |
 | `--market` | Market scope when tickers omitted (`us`, `ca`, `us_ca`) | `us_ca` |
@@ -446,22 +521,42 @@ backtester run \
 | `--cash` | Starting capital | `10000` |
 | `--max-positions` | Max concurrent positions | `100` |
 | `--max-alloc` | Max allocation per position (e.g. 0.10 = 10%) | `0.10` |
-| `--fee` | Fee per trade in dollars | `0.05` |
-| `--slippage-bps` | Slippage in basis points | `10.0` |
 | `--params` | Strategy parameters as JSON string | `{}` |
 | `--cache-dir` | Parquet data cache directory | `~/.backtester/cache` |
+| **Fees & Slippage** | | |
+| `--fee-model` | Fee model: `per_trade`, `percentage`, `composite_us` | `per_trade` |
+| `--fee` | Fee amount: dollars for `per_trade`, basis points for `percentage`/`composite_us` | `0.05` |
+| `--slippage-model` | Slippage model: `fixed`, `volume` | `fixed` |
+| `--slippage-bps` | Slippage in basis points (for `fixed` model) | `10.0` |
+| `--slippage-impact` | Impact factor for `volume` slippage model | `0.1` |
+| **Position Sizing** | | |
 | `--position-sizing` | Sizing model: `fixed_fractional`, `atr`, `vol_parity` | `fixed_fractional` |
-| `--risk-pct` | Risk per trade for ATR sizer (e.g. 0.01 = 1%) | `0.01` |
-| `--atr-multiple` | ATR multiple for stop distance in ATR sizer | `2.0` |
+| `--risk-pct` | Risk per trade for `atr` sizer (e.g. 0.01 = 1%) | `0.01` |
+| `--atr-multiple` | ATR multiple for stop distance in `atr` sizer | `2.0` |
+| `--vol-target` | Target annualized volatility for `vol_parity` sizer | `0.10` |
+| `--vol-lookback` | Lookback window (days) for `vol_parity` sizer | `20` |
+| **Stops** | | |
 | `--stop-loss` | Stop-loss as fraction (e.g. 0.05 = 5%) | disabled |
 | `--take-profit` | Take-profit as fraction (e.g. 0.20 = 20%) | disabled |
 | `--trailing-stop` | Trailing stop as fraction (e.g. 0.08 = 8%) | disabled |
 | `--stop-loss-atr` | Stop-loss in ATR multiples | disabled |
 | `--take-profit-atr` | Take-profit in ATR multiples | disabled |
+| **Regime Filter** | | |
 | `--regime-benchmark` | Regime filter benchmark ticker | disabled |
 | `--regime-fast` | Regime filter fast SMA period | `100` |
 | `--regime-slow` | Regime filter slow SMA period | `200` |
-| `--export-log` | Export activity log to CSV | disabled |
+| `--regime-condition` | Regime condition: `fast_above_slow`, `fast_below_slow` | `fast_above_slow` |
+| **Short Selling** | | |
+| `--allow-short` | Enable short selling (flag) | `false` |
+| `--short-borrow-rate` | Annualized short borrow rate | `0.02` |
+| `--margin-requirement` | Initial margin requirement (1.5 = 150%) | `1.5` |
+| **Output & Analytics** | | |
+| `--export-log` | Export activity log to CSV file path | disabled |
+| `--tearsheet` | Generate HTML tearsheet at file path | disabled |
+| `--report-regime` | Print regime performance breakdown (flag) | `false` |
+| `--report-signal-decay` | Print signal decay analysis (flag) | `false` |
+| `--report-correlation` | Print correlation matrix (flag) | `false` |
+| `--monte-carlo-runs` | Number of Monte Carlo simulations | `1000` |
 
 ### `backtester optimize`
 
@@ -478,25 +573,12 @@ backtester optimize \
   --metric sharpe_ratio
 ```
 
-**Options:**
+Supports all common options from `backtester run` (core, fees, slippage, position sizing, stops, regime, short selling), plus:
 
 | Option | Description | Default |
 |---|---|---|
-| `--strategy` | Strategy name | **required** |
-| `--tickers` | Comma-separated ticker symbols | **required** |
-| `--benchmark` | Benchmark ticker | **required** |
-| `--start` / `--end` | Date range (YYYY-MM-DD) | **required** |
 | `--grid` | Parameter grid as JSON (e.g. `{"sma_fast":[50,100]}`) | **required** |
 | `--metric` | Metric to optimize | `sharpe_ratio` |
-| `--cash` | Starting capital | `10000` |
-| `--max-positions` | Max concurrent positions | `100` |
-| `--max-alloc` | Max allocation per position | `0.10` |
-| `--fee` | Fee per trade in dollars | `0.05` |
-| `--slippage-bps` | Slippage in basis points | `10.0` |
-| `--params` | Base strategy params as JSON | `{}` |
-| `--market` | Market scope when tickers omitted | `us_ca` |
-| `--universe` | Universe breadth when tickers omitted | `index` |
-| `--cache-dir` | Parquet data cache directory | `~/.backtester/cache` |
 
 ### `backtester walk-forward`
 
@@ -515,28 +597,15 @@ backtester walk-forward \
   --anchored
 ```
 
-**Options:**
+Supports all common options from `backtester run` (core, fees, slippage, position sizing, stops, regime, short selling), plus:
 
 | Option | Description | Default |
 |---|---|---|
-| `--strategy` | Strategy name | **required** |
-| `--tickers` | Comma-separated ticker symbols | **required** |
-| `--benchmark` | Benchmark ticker | **required** |
-| `--start` / `--end` | Date range (YYYY-MM-DD) | **required** |
 | `--grid` | Parameter grid as JSON | **required** |
 | `--is-months` | In-sample window length in months | `12` |
 | `--oos-months` | Out-of-sample window length in months | `3` |
-| `--anchored` | Use expanding (anchored) in-sample window | `false` |
+| `--anchored` | Use expanding (anchored) in-sample window (flag) | `false` |
 | `--metric` | Metric to optimize | `sharpe_ratio` |
-| `--cash` | Starting capital | `10000` |
-| `--max-positions` | Max concurrent positions | `100` |
-| `--max-alloc` | Max allocation per position | `0.10` |
-| `--fee` | Fee per trade in dollars | `0.05` |
-| `--slippage-bps` | Slippage in basis points | `10.0` |
-| `--params` | Base strategy params as JSON | `{}` |
-| `--market` | Market scope when tickers omitted | `us_ca` |
-| `--universe` | Universe breadth when tickers omitted | `index` |
-| `--cache-dir` | Parquet data cache directory | `~/.backtester/cache` |
 
 ### `backtester list-strategies`
 

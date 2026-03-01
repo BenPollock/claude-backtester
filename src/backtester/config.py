@@ -54,3 +54,7 @@ class BacktestConfig:
     allow_short: bool = False  # master switch for short selling
     short_borrow_rate: float = 0.02  # annualized borrow cost rate (2% default)
     margin_requirement: float = 1.5  # initial margin requirement (150%)
+    fee_model: str = "per_trade"  # "per_trade", "percentage", "composite_us"
+    sizing_target_vol: float = 0.10  # VolatilityParity target volatility
+    sizing_vol_lookback: int = 20  # VolatilityParity lookback window
+    slippage_impact_factor: float = 0.1  # VolumeSlippage impact factor

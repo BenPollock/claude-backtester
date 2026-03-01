@@ -13,7 +13,7 @@ from backtester.strategies.registry import get_strategy
 from backtester.strategies.indicators import sma
 from backtester.execution.broker import SimulatedBroker
 from backtester.execution.slippage import FixedSlippage, VolumeSlippage
-from backtester.execution.fees import PerTradeFee
+from backtester.execution.fees import PerTradeFee, PercentageFee, CompositeFee, SECFee, TAFFee
 from backtester.execution.position_sizing import (
     PositionSizer, FixedFractional, ATRSizer, VolatilityParity,
 )
@@ -48,11 +48,21 @@ class BacktestEngine:
 
         # Set up execution models
         if config.slippage_model == "volume":
-            slippage = VolumeSlippage()
+            slippage = VolumeSlippage(impact_factor=config.slippage_impact_factor)
         else:
             slippage = FixedSlippage(bps=config.slippage_bps)
 
-        fees = PerTradeFee(fee=config.fee_per_trade)
+        # Fee model factory
+        if config.fee_model == "percentage":
+            fees = PercentageFee(bps=config.fee_per_trade)
+        elif config.fee_model == "composite_us":
+            fees = CompositeFee([
+                PercentageFee(bps=config.fee_per_trade),
+                SECFee(),
+                TAFFee(),
+            ])
+        else:
+            fees = PerTradeFee(fee=config.fee_per_trade)
         self._broker = SimulatedBroker(slippage=slippage, fees=fees)
         self._stop_mgr = StopManager(config.stop_config, fees)
 
@@ -63,7 +73,10 @@ class BacktestEngine:
                 atr_multiple=config.sizing_atr_multiple,
             )
         elif config.position_sizing == "vol_parity":
-            self._sizer = VolatilityParity()
+            self._sizer = VolatilityParity(
+                target_vol=config.sizing_target_vol,
+                lookback=config.sizing_vol_lookback,
+            )
         else:
             self._sizer = FixedFractional()
 
@@ -315,10 +328,17 @@ class BacktestEngine:
 
         logger.info(f"Backtest complete. {len(portfolio.trade_log)} trades executed.")
 
+        # Extract benchmark close prices for analytics
+        benchmark_prices = None
+        if benchmark_data is not None and "Close" in benchmark_data.columns:
+            benchmark_prices = benchmark_data["Close"]
+
         return BacktestResult(
             config=config,
             portfolio=portfolio,
             benchmark_equity=benchmark_equity if benchmark_equity else None,
+            benchmark_prices=benchmark_prices,
+            universe_data=universe_data,
         )
 
     def _compute_regime_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -346,6 +366,8 @@ class BacktestEngine:
 
         if rf.condition == "fast_above_slow":
             return fast > slow
+        elif rf.condition == "fast_below_slow":
+            return fast < slow
 
         return True  # unknown condition — default to allowing trades
 

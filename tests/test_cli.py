@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from backtester.cli import cli, _build_config
 from backtester.config import BacktestConfig, RegimeFilter, StopConfig
+from backtester.engine import BacktestEngine
 from backtester.result import BacktestResult
 from backtester.portfolio.portfolio import Portfolio
 from tests.conftest import make_price_df, MockDataSource
@@ -723,6 +724,716 @@ class TestWalkForwardCommand:
             assert captured_args["oos_months"] == 3
             assert captured_args["anchored"] is False
             assert captured_args["metric"] == "sharpe_ratio"
+
+
+class TestNewConfigFlags:
+    """Tests for Group A/B CLI flags that map to BacktestConfig fields."""
+
+    def _make_base_kwargs(self):
+        from datetime import datetime
+        return dict(
+            strategy="sma_crossover", tickers="SPY", market="us_ca",
+            universe="index", benchmark="SPY",
+            start=datetime(2020, 1, 2), end=datetime(2020, 12, 31),
+            cash=10_000.0, max_positions=10, max_alloc=0.10,
+            fee=0.05, slippage_bps=10.0, params="{}", cache_dir="/tmp/test",
+        )
+
+    def test_allow_short_flag(self):
+        """--allow-short should set allow_short=True in config."""
+        config = _build_config(**self._make_base_kwargs(), allow_short=True)
+        assert config.allow_short is True
+
+    def test_allow_short_default_false(self):
+        """allow_short should default to False."""
+        config = _build_config(**self._make_base_kwargs())
+        assert config.allow_short is False
+
+    def test_short_borrow_rate(self):
+        """--short-borrow-rate should set short_borrow_rate in config."""
+        config = _build_config(**self._make_base_kwargs(), short_borrow_rate=0.05)
+        assert config.short_borrow_rate == 0.05
+
+    def test_margin_requirement(self):
+        """--margin-requirement should set margin_requirement in config."""
+        config = _build_config(**self._make_base_kwargs(), margin_requirement=2.0)
+        assert config.margin_requirement == 2.0
+
+    def test_slippage_model(self):
+        """--slippage-model should set slippage_model in config."""
+        config = _build_config(**self._make_base_kwargs(), slippage_model="volume")
+        assert config.slippage_model == "volume"
+
+    def test_slippage_impact(self):
+        """--slippage-impact should set slippage_impact_factor in config."""
+        config = _build_config(**self._make_base_kwargs(), slippage_impact=0.25)
+        assert config.slippage_impact_factor == 0.25
+
+    def test_fee_model(self):
+        """--fee-model should set fee_model in config."""
+        config = _build_config(**self._make_base_kwargs(), fee_model="percentage")
+        assert config.fee_model == "percentage"
+
+    def test_fee_model_composite_us(self):
+        """--fee-model composite_us should be accepted."""
+        config = _build_config(**self._make_base_kwargs(), fee_model="composite_us")
+        assert config.fee_model == "composite_us"
+
+    def test_vol_target(self):
+        """--vol-target should set sizing_target_vol in config."""
+        config = _build_config(**self._make_base_kwargs(), vol_target=0.15)
+        assert config.sizing_target_vol == 0.15
+
+    def test_vol_lookback(self):
+        """--vol-lookback should set sizing_vol_lookback in config."""
+        config = _build_config(**self._make_base_kwargs(), vol_lookback=30)
+        assert config.sizing_vol_lookback == 30
+
+    def test_monte_carlo_runs(self):
+        """--monte-carlo-runs should set monte_carlo_runs in config."""
+        config = _build_config(**self._make_base_kwargs(), monte_carlo_runs=500)
+        assert config.monte_carlo_runs == 500
+
+    def test_regime_condition(self):
+        """--regime-condition should set condition on RegimeFilter."""
+        config = _build_config(
+            **self._make_base_kwargs(),
+            regime_benchmark="SPY",
+            regime_condition="fast_below_slow",
+        )
+        assert config.regime_filter is not None
+        assert config.regime_filter.condition == "fast_below_slow"
+
+    def test_regime_condition_default(self):
+        """Regime condition should default to fast_above_slow."""
+        config = _build_config(
+            **self._make_base_kwargs(),
+            regime_benchmark="SPY",
+        )
+        assert config.regime_filter.condition == "fast_above_slow"
+
+
+class TestNewFlagsCLIInvocation:
+    """Tests that new flags are accepted by CLI commands and produce correct config."""
+
+    def test_run_short_selling_flags(self, runner, mock_result):
+        """run with short selling flags should set correct config fields."""
+        captured = {}
+
+        def capture(config):
+            captured["config"] = config
+            engine = MagicMock()
+            engine.run.return_value = mock_result
+            return engine
+
+        with patch("backtester.cli.BacktestEngine", side_effect=capture), \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--allow-short",
+                "--short-borrow-rate", "0.05",
+                "--margin-requirement", "2.0",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.allow_short is True
+            assert config.short_borrow_rate == 0.05
+            assert config.margin_requirement == 2.0
+
+    def test_run_slippage_model_volume(self, runner, mock_result):
+        """run with --slippage-model volume and --slippage-impact should set config."""
+        captured = {}
+
+        def capture(config):
+            captured["config"] = config
+            engine = MagicMock()
+            engine.run.return_value = mock_result
+            return engine
+
+        with patch("backtester.cli.BacktestEngine", side_effect=capture), \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--slippage-model", "volume",
+                "--slippage-impact", "0.25",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.slippage_model == "volume"
+            assert config.slippage_impact_factor == 0.25
+
+    def test_run_fee_model(self, runner, mock_result):
+        """run with --fee-model should set config.fee_model."""
+        captured = {}
+
+        def capture(config):
+            captured["config"] = config
+            engine = MagicMock()
+            engine.run.return_value = mock_result
+            return engine
+
+        with patch("backtester.cli.BacktestEngine", side_effect=capture), \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--fee-model", "composite_us",
+                "--fee", "5.0",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.fee_model == "composite_us"
+            assert config.fee_per_trade == 5.0
+
+    def test_run_vol_parity_flags(self, runner, mock_result):
+        """run with vol parity flags should set config fields."""
+        captured = {}
+
+        def capture(config):
+            captured["config"] = config
+            engine = MagicMock()
+            engine.run.return_value = mock_result
+            return engine
+
+        with patch("backtester.cli.BacktestEngine", side_effect=capture), \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--position-sizing", "vol_parity",
+                "--vol-target", "0.15",
+                "--vol-lookback", "30",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.position_sizing == "vol_parity"
+            assert config.sizing_target_vol == 0.15
+            assert config.sizing_vol_lookback == 30
+
+    def test_run_monte_carlo_runs_flag(self, runner, mock_result):
+        """run with --monte-carlo-runs should set config.monte_carlo_runs."""
+        captured = {}
+
+        def capture(config):
+            captured["config"] = config
+            engine = MagicMock()
+            engine.run.return_value = mock_result
+            return engine
+
+        with patch("backtester.cli.BacktestEngine", side_effect=capture), \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--monte-carlo-runs", "500",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.monte_carlo_runs == 500
+
+    def test_run_regime_condition_flag(self, runner, mock_result):
+        """run with --regime-condition should set the condition on RegimeFilter."""
+        captured = {}
+
+        def capture(config):
+            captured["config"] = config
+            engine = MagicMock()
+            engine.run.return_value = mock_result
+            return engine
+
+        with patch("backtester.cli.BacktestEngine", side_effect=capture), \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--regime-benchmark", "SPY",
+                "--regime-condition", "fast_below_slow",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.regime_filter is not None
+            assert config.regime_filter.condition == "fast_below_slow"
+
+
+class TestAnalyticsOutputFlags:
+    """Tests for Group C analytics output flags (run only)."""
+
+    def test_tearsheet_flag(self, runner, mock_result):
+        """--tearsheet should call generate_tearsheet."""
+        with patch("backtester.cli.BacktestEngine") as mock_engine_cls, \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"), \
+             patch("backtester.analytics.tearsheet.generate_tearsheet", return_value="/tmp/test.html") as mock_ts:
+
+            mock_engine = MagicMock()
+            mock_engine.run.return_value = mock_result
+            mock_engine_cls.return_value = mock_engine
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--tearsheet", "/tmp/test.html",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            mock_ts.assert_called_once_with(mock_result, output_path="/tmp/test.html")
+            assert "Tearsheet written to" in result.output
+
+    def test_report_regime_flag(self, runner):
+        """--report-regime should call regime_summary and print output."""
+        portfolio = Portfolio(cash=100_000.0)
+        portfolio.record_equity(date(2020, 1, 2))
+        portfolio.record_equity(date(2020, 1, 3))
+        benchmark_eq = [(date(2020, 1, 2), 100_000.0), (date(2020, 1, 3), 100_050.0)]
+        bench_prices = pd.Series([300.0, 301.0],
+                                 index=pd.DatetimeIndex([date(2020, 1, 2), date(2020, 1, 3)]))
+        result_obj = BacktestResult(
+            config=BacktestConfig(
+                strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+                start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+                starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            ),
+            portfolio=portfolio,
+            benchmark_equity=benchmark_eq,
+            benchmark_prices=bench_prices,
+        )
+
+        mock_summary = {
+            "market_regime_perf": pd.DataFrame({"return": [0.05]}, index=["bull"]),
+            "vol_regime_perf": pd.DataFrame({"return": [0.03]}, index=["low_vol"]),
+        }
+
+        with patch("backtester.cli.BacktestEngine") as mock_engine_cls, \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"), \
+             patch("backtester.analytics.regime.regime_summary", return_value=mock_summary) as mock_rs:
+
+            mock_engine = MagicMock()
+            mock_engine.run.return_value = result_obj
+            mock_engine_cls.return_value = mock_engine
+
+            runner = CliRunner()
+            cli_result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--report-regime",
+            ])
+
+            assert cli_result.exit_code == 0, f"CLI failed: {cli_result.output}"
+            mock_rs.assert_called_once()
+            assert "Regime Performance" in cli_result.output
+
+    def test_report_regime_no_benchmark(self, runner, mock_result):
+        """--report-regime without benchmark prices should print a message."""
+        with patch("backtester.cli.BacktestEngine") as mock_engine_cls, \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"):
+
+            mock_engine = MagicMock()
+            mock_engine.run.return_value = mock_result
+            mock_engine_cls.return_value = mock_engine
+
+            result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--report-regime",
+            ])
+
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            assert "requires benchmark data" in result.output
+
+    def test_report_correlation_flag(self, runner):
+        """--report-correlation should call compute_correlation_matrix."""
+        portfolio = Portfolio(cash=100_000.0)
+        portfolio.record_equity(date(2020, 1, 2))
+        portfolio.record_equity(date(2020, 1, 3))
+        benchmark_eq = [(date(2020, 1, 2), 100_000.0), (date(2020, 1, 3), 100_050.0)]
+
+        df1 = make_price_df(start_price=100.0)
+        df2 = make_price_df(start_price=200.0)
+        universe = {"SPY": df1, "QQQ": df2}
+
+        result_obj = BacktestResult(
+            config=BacktestConfig(
+                strategy_name="sma_crossover", tickers=["SPY", "QQQ"], benchmark="SPY",
+                start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+                starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            ),
+            portfolio=portfolio,
+            benchmark_equity=benchmark_eq,
+            universe_data=universe,
+        )
+
+        mock_corr = pd.DataFrame(
+            [[1.0, 0.8], [0.8, 1.0]],
+            index=["SPY", "QQQ"], columns=["SPY", "QQQ"],
+        )
+
+        with patch("backtester.cli.BacktestEngine") as mock_engine_cls, \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"), \
+             patch("backtester.analytics.correlation.compute_correlation_matrix", return_value=mock_corr) as mock_cc:
+
+            mock_engine = MagicMock()
+            mock_engine.run.return_value = result_obj
+            mock_engine_cls.return_value = mock_engine
+
+            runner = CliRunner()
+            cli_result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY,QQQ",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--report-correlation",
+            ])
+
+            assert cli_result.exit_code == 0, f"CLI failed: {cli_result.output}"
+            mock_cc.assert_called_once_with(universe)
+            assert "Correlation Matrix" in cli_result.output
+
+    def test_report_signal_decay_flag(self, runner):
+        """--report-signal-decay should call signal_decay_summary."""
+        portfolio = Portfolio(cash=100_000.0)
+        portfolio.record_equity(date(2020, 1, 2))
+        portfolio.record_equity(date(2020, 1, 3))
+
+        df1 = make_price_df(start_price=100.0)
+        universe = {"SPY": df1}
+
+        # Create a mock trade
+        mock_trade = MagicMock()
+        mock_trade.symbol = "SPY"
+        mock_trade.entry_date = date(2020, 1, 2)
+        mock_trade.exit_date = date(2020, 1, 3)
+        mock_trade.entry_price = 100.0
+        portfolio.trade_log.append(mock_trade)
+
+        result_obj = BacktestResult(
+            config=BacktestConfig(
+                strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+                start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+                starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            ),
+            portfolio=portfolio,
+            universe_data=universe,
+        )
+
+        mock_summary = {
+            "total_signals": 1,
+            "avg_decay": pd.Series([0.01, 0.02], index=["T+1", "T+2"]),
+            "optimal_holding": {"optimal_days": 2, "peak_return": 0.02},
+        }
+
+        with patch("backtester.cli.BacktestEngine") as mock_engine_cls, \
+             patch("backtester.cli.print_report"), \
+             patch("backtester.cli.plot_results"), \
+             patch("backtester.analytics.signal_decay.signal_decay_summary", return_value=mock_summary) as mock_sd:
+
+            mock_engine = MagicMock()
+            mock_engine.run.return_value = result_obj
+            mock_engine_cls.return_value = mock_engine
+
+            runner = CliRunner()
+            cli_result = runner.invoke(cli, [
+                "run",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--report-signal-decay",
+            ])
+
+            assert cli_result.exit_code == 0, f"CLI failed: {cli_result.output}"
+            mock_sd.assert_called_once()
+            assert "Signal Decay Analysis" in cli_result.output
+            assert "Optimal holding period: 2 days" in cli_result.output
+
+
+class TestCommandParity:
+    """Tests that optimize and walk-forward accept the same flags as run."""
+
+    def _make_fake_grid_search(self, captured):
+        def fake(base_config, param_grid, optimize_metric="sharpe_ratio"):
+            captured["config"] = base_config
+            from backtester.research.optimizer import OptimizationResult
+            return OptimizationResult(
+                results_table=pd.DataFrame(), best_params={},
+                best_metric_value=0.0, optimize_metric=optimize_metric,
+            )
+        return fake
+
+    def _make_fake_walk_forward(self, captured):
+        def fake(base_config, param_grid, is_months=12, oos_months=3,
+                 anchored=False, optimize_metric="sharpe_ratio"):
+            captured["config"] = base_config
+            return {"num_windows": 0, "windows": [], "oos_metrics": {},
+                    "aggregate_sharpe": 0.0}
+        return fake
+
+    def test_optimize_accepts_regime_flags(self, runner):
+        """optimize should accept regime filter flags."""
+        captured = {}
+        with patch("backtester.research.optimizer.grid_search",
+                   side_effect=self._make_fake_grid_search(captured)), \
+             patch("backtester.research.optimizer.print_optimization_results"):
+            result = runner.invoke(cli, [
+                "optimize",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--grid", '{"sma_fast": [50]}',
+                "--regime-benchmark", "SPY",
+                "--regime-fast", "50",
+                "--regime-slow", "150",
+                "--regime-condition", "fast_below_slow",
+            ])
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.regime_filter is not None
+            assert config.regime_filter.condition == "fast_below_slow"
+
+    def test_optimize_accepts_stop_flags(self, runner):
+        """optimize should accept stop config flags."""
+        captured = {}
+        with patch("backtester.research.optimizer.grid_search",
+                   side_effect=self._make_fake_grid_search(captured)), \
+             patch("backtester.research.optimizer.print_optimization_results"):
+            result = runner.invoke(cli, [
+                "optimize",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--grid", '{"sma_fast": [50]}',
+                "--stop-loss", "0.05",
+                "--take-profit", "0.20",
+            ])
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.stop_config is not None
+            assert config.stop_config.stop_loss_pct == 0.05
+
+    def test_optimize_accepts_short_selling_flags(self, runner):
+        """optimize should accept short selling flags."""
+        captured = {}
+        with patch("backtester.research.optimizer.grid_search",
+                   side_effect=self._make_fake_grid_search(captured)), \
+             patch("backtester.research.optimizer.print_optimization_results"):
+            result = runner.invoke(cli, [
+                "optimize",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2020-01-02",
+                "--end", "2020-12-31",
+                "--grid", '{"sma_fast": [50]}',
+                "--allow-short",
+                "--fee-model", "percentage",
+                "--slippage-model", "volume",
+            ])
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.allow_short is True
+            assert config.fee_model == "percentage"
+            assert config.slippage_model == "volume"
+
+    def test_walk_forward_accepts_regime_flags(self, runner):
+        """walk-forward should accept regime filter flags."""
+        captured = {}
+        with patch("backtester.research.walk_forward.walk_forward",
+                   side_effect=self._make_fake_walk_forward(captured)), \
+             patch("backtester.research.walk_forward.print_walk_forward_results"):
+            result = runner.invoke(cli, [
+                "walk-forward",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2018-01-02",
+                "--end", "2020-12-31",
+                "--grid", '{"sma_fast": [50]}',
+                "--regime-benchmark", "SPY",
+                "--regime-condition", "fast_below_slow",
+            ])
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.regime_filter is not None
+            assert config.regime_filter.condition == "fast_below_slow"
+
+    def test_walk_forward_accepts_stop_and_sizing_flags(self, runner):
+        """walk-forward should accept stop and position sizing flags."""
+        captured = {}
+        with patch("backtester.research.walk_forward.walk_forward",
+                   side_effect=self._make_fake_walk_forward(captured)), \
+             patch("backtester.research.walk_forward.print_walk_forward_results"):
+            result = runner.invoke(cli, [
+                "walk-forward",
+                "--strategy", "sma_crossover",
+                "--tickers", "SPY",
+                "--benchmark", "SPY",
+                "--start", "2018-01-02",
+                "--end", "2020-12-31",
+                "--grid", '{"sma_fast": [50]}',
+                "--stop-loss", "0.05",
+                "--position-sizing", "vol_parity",
+                "--vol-target", "0.15",
+                "--vol-lookback", "30",
+            ])
+            assert result.exit_code == 0, f"CLI failed: {result.output}"
+            config = captured["config"]
+            assert config.stop_config is not None
+            assert config.position_sizing == "vol_parity"
+            assert config.sizing_target_vol == 0.15
+            assert config.sizing_vol_lookback == 30
+
+
+class TestEngineWiring:
+    """Tests that engine correctly wires config fields to execution models."""
+
+    def test_fee_factory_per_trade(self):
+        """fee_model='per_trade' should create PerTradeFee."""
+        from backtester.execution.fees import PerTradeFee
+        config = BacktestConfig(
+            strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+            starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            fee_model="per_trade", fee_per_trade=1.0,
+        )
+        engine = BacktestEngine(config)
+        assert isinstance(engine._broker._fees, PerTradeFee)
+
+    def test_fee_factory_percentage(self):
+        """fee_model='percentage' should create PercentageFee."""
+        from backtester.execution.fees import PercentageFee
+        config = BacktestConfig(
+            strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+            starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            fee_model="percentage", fee_per_trade=5.0,
+        )
+        engine = BacktestEngine(config)
+        assert isinstance(engine._broker._fees, PercentageFee)
+
+    def test_fee_factory_composite_us(self):
+        """fee_model='composite_us' should create CompositeFee."""
+        from backtester.execution.fees import CompositeFee
+        config = BacktestConfig(
+            strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+            starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            fee_model="composite_us", fee_per_trade=5.0,
+        )
+        engine = BacktestEngine(config)
+        assert isinstance(engine._broker._fees, CompositeFee)
+
+    def test_volume_slippage_uses_config_impact(self):
+        """VolumeSlippage should use config's slippage_impact_factor."""
+        from backtester.execution.slippage import VolumeSlippage
+        config = BacktestConfig(
+            strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+            starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            slippage_model="volume", slippage_impact_factor=0.25,
+        )
+        engine = BacktestEngine(config)
+        assert isinstance(engine._broker._slippage, VolumeSlippage)
+        assert engine._broker._slippage._impact == 0.25
+
+    def test_vol_parity_uses_config_params(self):
+        """VolatilityParity should use config's target_vol and lookback."""
+        from backtester.execution.position_sizing import VolatilityParity
+        config = BacktestConfig(
+            strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+            starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            position_sizing="vol_parity",
+            sizing_target_vol=0.15, sizing_vol_lookback=30,
+        )
+        engine = BacktestEngine(config)
+        assert isinstance(engine._sizer, VolatilityParity)
+        assert engine._sizer._target_vol == 0.15
+        assert engine._sizer._lookback == 30
+
+    def test_regime_fast_below_slow(self):
+        """fast_below_slow regime condition should return True when fast < slow."""
+        config = BacktestConfig(
+            strategy_name="sma_crossover", tickers=["SPY"], benchmark="SPY",
+            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
+            starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+            regime_filter=RegimeFilter(
+                benchmark="SPY", indicator="sma",
+                fast_period=50, slow_period=200,
+                condition="fast_below_slow",
+            ),
+        )
+        engine = BacktestEngine(config)
+        # fast < slow → True for fast_below_slow
+        row = pd.Series({"regime_fast": 100.0, "regime_slow": 200.0})
+        assert engine._check_regime(row) == True
+        # fast > slow → False for fast_below_slow
+        row2 = pd.Series({"regime_fast": 250.0, "regime_slow": 200.0})
+        assert engine._check_regime(row2) == False
 
 
 class TestVerboseFlag:

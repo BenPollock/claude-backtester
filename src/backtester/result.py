@@ -12,10 +12,14 @@ class BacktestResult:
     """Container for backtest outputs."""
 
     def __init__(self, config: BacktestConfig, portfolio: Portfolio,
-                 benchmark_equity: list[tuple[date, float]] | None = None):
+                 benchmark_equity: list[tuple[date, float]] | None = None,
+                 benchmark_prices: pd.Series | None = None,
+                 universe_data: dict[str, pd.DataFrame] | None = None):
         self.config = config
         self.portfolio = portfolio
         self.benchmark_equity = benchmark_equity
+        self.benchmark_prices = benchmark_prices
+        self.universe_data = universe_data
 
     @property
     def equity_series(self) -> pd.Series:
