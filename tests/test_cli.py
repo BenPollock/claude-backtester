@@ -558,7 +558,7 @@ class TestOptimizeCommand:
         """'optimize' should parse --grid JSON and pass to grid_search."""
         captured_args = {}
 
-        def fake_grid_search(base_config, param_grid, optimize_metric="sharpe_ratio"):
+        def fake_grid_search(base_config, param_grid, optimize_metric="sharpe_ratio", **kwargs):
             captured_args["config"] = base_config
             captured_args["grid"] = param_grid
             captured_args["metric"] = optimize_metric
@@ -596,7 +596,7 @@ class TestOptimizeCommand:
         """'optimize' should build base config with correct strategy and tickers."""
         captured_args = {}
 
-        def fake_grid_search(base_config, param_grid, optimize_metric="sharpe_ratio"):
+        def fake_grid_search(base_config, param_grid, optimize_metric="sharpe_ratio", **kwargs):
             captured_args["config"] = base_config
             from backtester.research.optimizer import OptimizationResult
             return OptimizationResult(
@@ -1297,7 +1297,7 @@ class TestCommandParity:
     """Tests that optimize and walk-forward accept the same flags as run."""
 
     def _make_fake_grid_search(self, captured):
-        def fake(base_config, param_grid, optimize_metric="sharpe_ratio"):
+        def fake(base_config, param_grid, optimize_metric="sharpe_ratio", **kwargs):
             captured["config"] = base_config
             from backtester.research.optimizer import OptimizationResult
             return OptimizationResult(

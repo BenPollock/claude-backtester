@@ -108,16 +108,17 @@ class Position:
     def add_lot(self, quantity: int, price: float, entry_date: date, commission: float = 0.0) -> None:
         self.lots.append(Lot(quantity=quantity, entry_price=price, entry_date=entry_date, commission=commission))
 
-    def accrue_borrow_cost(self, rate_annual: float, days: int = 1) -> None:
-        """Accrue short borrow cost.
+    def accrue_borrow_cost(self, rate_annual: float, days: int = 1) -> float:
+        """Accrue short borrow cost and return the daily cost.
 
         cost = abs(market_value) * rate_annual / 252 * days
-        Only meaningful for short positions.
+        Only meaningful for short positions. Returns the cost deducted.
         """
         if self.total_quantity >= 0:
-            return
+            return 0.0
         daily_cost = abs(self.market_value) * rate_annual / 252 * days
         self.short_borrow_cost_accrued += daily_cost
+        return daily_cost
 
     # ---- FIFO close logic ----
 
@@ -164,6 +165,96 @@ class Position:
                 self.lots.pop(0)
             else:
                 # Adjust remaining commission for partial lot
+                lot.commission -= entry_comm
+
+            remaining -= sell_qty
+
+        return trades
+
+    def sell_lots_lifo(self, quantity: int, exit_price: float, exit_date: date, exit_commission: float = 0.0) -> list[Trade]:
+        """Sell ``quantity`` shares of a long position using LIFO (Gap 36)."""
+        if quantity > self.total_quantity:
+            raise ValueError(f"Cannot sell {quantity} shares of {self.symbol}; only hold {self.total_quantity}")
+
+        trades: list[Trade] = []
+        remaining = quantity
+        commission_per_share = exit_commission / quantity if quantity > 0 else 0.0
+
+        while remaining > 0 and self.lots:
+            lot = self.lots[-1]  # LIFO: take from end
+            sell_qty = min(remaining, lot.quantity)
+
+            entry_comm = lot.commission * (sell_qty / lot.quantity) if lot.quantity > 0 else 0.0
+            exit_comm = commission_per_share * sell_qty
+            total_fees = entry_comm + exit_comm
+
+            pnl = (exit_price - lot.entry_price) * sell_qty - total_fees
+            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else 0.0
+
+            trades.append(Trade(
+                symbol=self.symbol,
+                entry_date=lot.entry_date,
+                exit_date=exit_date,
+                entry_price=lot.entry_price,
+                exit_price=exit_price,
+                quantity=sell_qty,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                holding_days=(exit_date - lot.entry_date).days,
+                fees_total=total_fees,
+            ))
+
+            lot.quantity -= sell_qty
+            if lot.quantity == 0:
+                self.lots.pop()  # remove from end
+            else:
+                lot.commission -= entry_comm
+
+            remaining -= sell_qty
+
+        return trades
+
+    def sell_lots_by_cost(self, quantity: int, exit_price: float, exit_date: date,
+                          exit_commission: float = 0.0, highest_first: bool = True) -> list[Trade]:
+        """Sell ``quantity`` shares sorted by cost basis (Gap 36)."""
+        if quantity > self.total_quantity:
+            raise ValueError(f"Cannot sell {quantity} shares of {self.symbol}; only hold {self.total_quantity}")
+
+        # Sort lots by entry_price
+        self.lots.sort(key=lambda lot: lot.entry_price, reverse=highest_first)
+
+        trades: list[Trade] = []
+        remaining = quantity
+        commission_per_share = exit_commission / quantity if quantity > 0 else 0.0
+
+        while remaining > 0 and self.lots:
+            lot = self.lots[0]
+            sell_qty = min(remaining, lot.quantity)
+
+            entry_comm = lot.commission * (sell_qty / lot.quantity) if lot.quantity > 0 else 0.0
+            exit_comm = commission_per_share * sell_qty
+            total_fees = entry_comm + exit_comm
+
+            pnl = (exit_price - lot.entry_price) * sell_qty - total_fees
+            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else 0.0
+
+            trades.append(Trade(
+                symbol=self.symbol,
+                entry_date=lot.entry_date,
+                exit_date=exit_date,
+                entry_price=lot.entry_price,
+                exit_price=exit_price,
+                quantity=sell_qty,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                holding_days=(exit_date - lot.entry_date).days,
+                fees_total=total_fees,
+            ))
+
+            lot.quantity -= sell_qty
+            if lot.quantity == 0:
+                self.lots.pop(0)
+            else:
                 lot.commission -= entry_comm
 
             remaining -= sell_qty

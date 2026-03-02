@@ -1,14 +1,60 @@
 """Ticker universe provider — auto-populates ticker lists from index constituents."""
 
+import csv
 import json
 import logging
 import time
 import urllib.request
+from bisect import bisect_right
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+class HistoricalUniverse:
+    """Point-in-time universe membership from a CSV file.
+
+    The CSV must have columns ``date`` (YYYY-MM-DD) and ``symbol``.
+    Each row records a snapshot of which symbols were in the universe on
+    that date.  ``members_on(query_date)`` returns the membership set
+    from the latest snapshot on or before *query_date* using binary
+    search for O(log n) lookups.
+    """
+
+    def __init__(self, path: str):
+        self._snapshots: list[date] = []
+        self._members: dict[date, set[str]] = {}
+        self._all_symbols: set[str] = set()
+        self._load(path)
+
+    def _load(self, path: str) -> None:
+        raw: dict[date, set[str]] = {}
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                d = date.fromisoformat(row["date"].strip())
+                sym = row["symbol"].strip().upper()
+                raw.setdefault(d, set()).add(sym)
+                self._all_symbols.add(sym)
+        self._snapshots = sorted(raw.keys())
+        self._members = raw
+
+    def members_on(self, query_date: date) -> set[str] | None:
+        """Return the universe membership set for the latest snapshot <= query_date."""
+        if not self._snapshots:
+            return None
+        idx = bisect_right(self._snapshots, query_date) - 1
+        if idx < 0:
+            return None
+        return self._members[self._snapshots[idx]]
+
+    @property
+    def all_symbols(self) -> set[str]:
+        """Union of all symbols that appear in any snapshot."""
+        return set(self._all_symbols)
 
 _CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 days
 

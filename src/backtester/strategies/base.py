@@ -6,7 +6,7 @@ from datetime import date
 
 import pandas as pd
 
-from backtester.types import SignalAction
+from backtester.types import SignalAction, OrderType
 from backtester.portfolio.portfolio import PortfolioState
 from backtester.portfolio.position import Position
 
@@ -22,6 +22,8 @@ class Signal:
     Attributes:
         action: The trading signal (BUY, SELL, HOLD, SHORT, COVER).
         limit_price: If set, submits a limit order instead of a market order.
+        stop_price: If set, submits a stop or stop-limit order.
+        order_type: Order type (MARKET, LIMIT, STOP, STOP_LIMIT).
         time_in_force: ``"DAY"`` (expires end of day) or ``"GTC"``
             (good-til-cancelled, persists across days).  Default ``"DAY"``.
         expiry_date: Optional explicit expiry date for GTC orders.
@@ -29,6 +31,8 @@ class Signal:
 
     action: SignalAction
     limit_price: float | None = None
+    stop_price: float | None = None
+    order_type: OrderType = OrderType.MARKET
     time_in_force: str = "DAY"
     expiry_date: date | None = None
 
@@ -42,6 +46,9 @@ class Strategy(ABC):
     3. generate_signals() — called per (symbol, day) during the backtest loop
     4. size_order() — determine position size for a signal
     """
+
+    def __init__(self):
+        self._fundamental_data = None
 
     def configure(self, params: dict) -> None:
         """Override to accept strategy-specific parameters."""
@@ -166,3 +173,71 @@ class Strategy(ABC):
                 return -1  # sentinel: cover all
 
         return 0
+
+    # --- Gap 9: Fundamental data access ---
+
+    def set_fundamental_data(self, manager) -> None:
+        """Inject a FundamentalDataManager. Called by the engine."""
+        self._fundamental_data = manager
+
+    def get_fundamental(self, symbol: str, field: str, as_of: date) -> float | None:
+        """Look up a point-in-time fundamental value."""
+        if self._fundamental_data is None:
+            return None
+        return self._fundamental_data.get(symbol, field, as_of)
+
+    # --- Gap 15: Target-weight rebalancing ---
+
+    def target_weights(
+        self,
+        bar_data: dict[str, pd.Series],
+        portfolio_state: PortfolioState,
+        benchmark_row: pd.Series | None = None,
+    ) -> dict[str, float] | None:
+        """Return target portfolio weights, or None for signal-based mode.
+
+        Override in weight-based strategies to return a dict mapping
+        symbols to target weights (0.0 to 1.0). When this returns
+        non-None, the engine will compute rebalance orders instead of
+        processing per-symbol signals.
+        """
+        return None
+
+
+class CrossSectionalStrategy(Strategy):
+    """Strategy that ranks the entire universe and selects top/bottom symbols.
+
+    Subclasses implement ``rank_universe()`` instead of per-symbol
+    ``generate_signals()``.  The engine detects this via ``isinstance``
+    and calls ``rank_universe()`` once per day with all available bar
+    data.
+    """
+
+    def generate_signals(self, symbol, row, position, portfolio_state, benchmark_row=None):
+        """Not used for cross-sectional strategies — returns HOLD."""
+        return SignalAction.HOLD
+
+    @abstractmethod
+    def rank_universe(
+        self,
+        bar_data: dict[str, pd.Series],
+        positions: dict[str, "Position"],
+        portfolio_state: PortfolioState,
+        benchmark_row: pd.Series | None = None,
+    ) -> list[tuple[str, SignalAction]]:
+        """Rank all symbols and return a list of (symbol, signal) tuples.
+
+        Called once per trading day with all available bar data.
+        Return signals for the symbols you want to trade.
+        """
+        ...
+
+    @staticmethod
+    def top_n(scores: dict[str, float], n: int) -> list[str]:
+        """Return top N symbols by score (descending)."""
+        return [s for s, _ in sorted(scores.items(), key=lambda x: -x[1])[:n]]
+
+    @staticmethod
+    def bottom_n(scores: dict[str, float], n: int) -> list[str]:
+        """Return bottom N symbols by score (ascending)."""
+        return [s for s, _ in sorted(scores.items(), key=lambda x: x[1])[:n]]

@@ -42,3 +42,30 @@ class VolumeSlippage(SlippageModel):
             return fill_price + slip
         else:
             return fill_price - slip
+
+
+class SqrtImpactSlippage(SlippageModel):
+    """Square-root market impact model (Almgren-Chriss approximation).
+
+    impact = impact_factor * sigma * sqrt(order_qty / volume) * fill_price
+    BUY: fill_price + impact; SELL: fill_price - impact
+    """
+
+    def __init__(self, sigma: float = 0.02, impact_factor: float = 0.1):
+        self._sigma = sigma
+        self._impact_factor = impact_factor
+
+    def compute(self, order: Order, fill_price: float, volume: float) -> float:
+        if volume <= 0:
+            return fill_price
+        import math
+        impact = (
+            self._impact_factor
+            * self._sigma
+            * math.sqrt(order.quantity / volume)
+            * fill_price
+        )
+        if order.side == Side.BUY:
+            return fill_price + impact
+        else:
+            return fill_price - impact

@@ -93,3 +93,51 @@ class Portfolio:
         if equity <= 0 or symbol not in self.positions:
             return 0.0
         return self.positions[symbol].market_value / equity
+
+    def compute_rebalance_orders(
+        self, target_weights: dict[str, float], prices: dict[str, float],
+    ) -> list[tuple[str, "Side", int]]:
+        """Compute orders to rebalance to target weights (Gap 15).
+
+        Returns list of (symbol, Side, quantity) tuples. Sells are
+        generated first to free up cash, then buys.
+        """
+        from backtester.types import Side
+        equity = self.total_equity
+        if equity <= 0:
+            return []
+
+        orders: list[tuple[str, Side, int]] = []
+
+        # Compute current weights
+        current_weights: dict[str, float] = {}
+        for sym, pos in self.positions.items():
+            if sym in prices and prices[sym] > 0:
+                current_weights[sym] = pos.market_value / equity
+
+        # Sells first (symbols that need to decrease or be closed)
+        for sym in list(current_weights.keys()):
+            target = target_weights.get(sym, 0.0)
+            current = current_weights.get(sym, 0.0)
+            if target < current:
+                delta_value = (current - target) * equity
+                price = prices.get(sym, 0)
+                if price > 0:
+                    qty = int(delta_value / price)
+                    if qty > 0:
+                        orders.append((sym, Side.SELL, qty))
+
+        # Buys (symbols that need to increase or be opened)
+        for sym, target in target_weights.items():
+            if target <= 0:
+                continue
+            current = current_weights.get(sym, 0.0)
+            if target > current:
+                delta_value = (target - current) * equity
+                price = prices.get(sym, 0)
+                if price > 0:
+                    qty = int(delta_value / price)
+                    if qty > 0:
+                        orders.append((sym, Side.BUY, qty))
+
+        return orders

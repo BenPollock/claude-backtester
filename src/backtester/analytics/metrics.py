@@ -274,6 +274,58 @@ def exposure_time(equity_series: pd.Series, trades) -> float:
     return len(invested_dates & equity_dates) / total_days
 
 
+def historical_var(equity_series: pd.Series, confidence: float = 0.95) -> float:
+    """Historical Value at Risk (Gap 6).
+
+    Returns the daily return at the (1-confidence) percentile.
+    E.g., VaR at 95% confidence returns the 5th percentile of returns.
+    """
+    returns = equity_series.pct_change().dropna()
+    if len(returns) < 2:
+        return 0.0
+    return float(np.percentile(returns, (1 - confidence) * 100))
+
+
+def cvar(equity_series: pd.Series, confidence: float = 0.95) -> float:
+    """Conditional Value at Risk (Expected Shortfall) (Gap 6).
+
+    Mean of returns below the VaR threshold.
+    """
+    returns = equity_series.pct_change().dropna()
+    if len(returns) < 2:
+        return 0.0
+    var = historical_var(equity_series, confidence)
+    tail = returns[returns <= var]
+    if len(tail) == 0:
+        return var
+    return float(tail.mean())
+
+
+def omega_ratio(equity_series: pd.Series, threshold: float = 0.0) -> float:
+    """Omega Ratio: gains above threshold / losses below threshold (Gap 43)."""
+    returns = equity_series.pct_change().dropna()
+    if len(returns) < 2:
+        return 0.0
+    gains = returns[returns > threshold] - threshold
+    losses = threshold - returns[returns <= threshold]
+    if losses.sum() == 0:
+        return float("inf") if gains.sum() > 0 else 0.0
+    return float(gains.sum() / losses.sum())
+
+
+def treynor_ratio(
+    equity_series: pd.Series,
+    benchmark_series: pd.Series,
+    risk_free_rate: float = 0.0,
+) -> float:
+    """Treynor Ratio: (CAGR - risk_free) / beta (Gap 43)."""
+    b = beta(equity_series, benchmark_series)
+    if b == 0:
+        return 0.0
+    c = cagr(equity_series)
+    return (c - risk_free_rate) / b
+
+
 def compute_all_metrics(
     equity_series: pd.Series,
     trades,
@@ -299,6 +351,13 @@ def compute_all_metrics(
         **max_consecutive(trades),
     }
 
+    # Risk metrics (Gap 6)
+    m["var_95"] = historical_var(equity_series, 0.95)
+    m["cvar_95"] = cvar(equity_series, 0.95)
+
+    # Omega ratio (Gap 43)
+    m["omega_ratio"] = omega_ratio(equity_series)
+
     # Benchmark-relative metrics (only when benchmark provided)
     if benchmark_series is not None and len(benchmark_series) >= 2:
         m["alpha"] = alpha(equity_series, benchmark_series, risk_free_rate)
@@ -307,5 +366,7 @@ def compute_all_metrics(
         m["tracking_error"] = tracking_error(equity_series, benchmark_series)
         m["up_capture"] = capture_ratio(equity_series, benchmark_series, "up")
         m["down_capture"] = capture_ratio(equity_series, benchmark_series, "down")
+        # Treynor ratio (Gap 43)
+        m["treynor_ratio"] = treynor_ratio(equity_series, benchmark_series, risk_free_rate)
 
     return m

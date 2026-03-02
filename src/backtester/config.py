@@ -48,7 +48,7 @@ class BacktestConfig:
     strategy_params: dict = field(default_factory=dict)
     regime_filter: RegimeFilter | None = None
     stop_config: StopConfig | None = None
-    position_sizing: str = "fixed_fractional"  # "fixed_fractional", "atr", "vol_parity"
+    position_sizing: str = "fixed_fractional"  # "fixed_fractional", "atr", "vol_parity", "kelly", "risk_parity"
     sizing_risk_pct: float = 0.01  # for ATR sizer: risk 1% of equity per trade
     sizing_atr_multiple: float = 2.0  # for ATR sizer: stop distance in ATR units
     allow_short: bool = False  # master switch for short selling
@@ -57,4 +57,56 @@ class BacktestConfig:
     fee_model: str = "per_trade"  # "per_trade", "percentage", "composite_us"
     sizing_target_vol: float = 0.10  # VolatilityParity target volatility
     sizing_vol_lookback: int = 20  # VolatilityParity lookback window
-    slippage_impact_factor: float = 0.1  # VolumeSlippage impact factor
+    slippage_impact_factor: float = 0.1  # VolumeSlippage / SqrtImpact impact factor
+
+    # --- Gap 1: Survivorship-bias-free universe ---
+    universe_file: str | None = None  # CSV with date,symbol columns
+
+    # --- Gap 2: Corporate actions ---
+    adjust_prices: str = "splits"  # "none", "splits", "splits_and_dividends"
+
+    # --- Gap 3: Partial fills ---
+    max_volume_pct: float = 0.10  # max fraction of daily volume fillable
+    partial_fill_policy: str = "cancel"  # "cancel" or "requeue"
+
+    # --- Gap 5: Drawdown kill switch ---
+    max_drawdown_pct: float | None = None  # e.g. 0.10 = halt at 10% drawdown
+
+    # --- Gap 8: Multi-source data ---
+    data_path: str | None = None  # path for csv/parquet data sources
+
+    # --- Gap 9: Fundamental data sidecar ---
+    fundamental_data_path: str | None = None
+
+    # --- Gap 14: Fill price model ---
+    fill_price_model: str = "open"  # "open", "close", "vwap", "random"
+
+    # --- Gap 15: Rebalancing ---
+    rebalance_schedule: str = "daily"  # "daily", "weekly", "monthly", "quarterly"
+
+    # --- Gap 16: Dividend reinvestment ---
+    drip: bool = False
+
+    # --- Gap 17: Kelly criterion ---
+    kelly_fraction: float = 0.5  # half-Kelly default
+
+    # --- Gap 18: Sector exposure limits ---
+    max_sector_exposure: float | None = None  # e.g. 0.30 = 30% max per sector
+    sector_map_path: str | None = None  # CSV with symbol,sector
+
+    # --- Gap 19: Gross/net exposure limits ---
+    max_gross_exposure: float | None = None
+    max_net_exposure: float | None = None
+
+    # --- Gap 20: Portfolio-level vol targeting ---
+    target_portfolio_vol: float | None = None
+    portfolio_vol_lookback: int = 60
+
+    # --- Gap 29: Parallel execution ---
+    workers: int = 1
+
+    # --- Gap 30: Result persistence ---
+    save_results_path: str | None = None
+
+    # --- Gap 36: Lot accounting method ---
+    lot_method: str = "fifo"  # "fifo", "lifo", "highest_cost", "lowest_cost"

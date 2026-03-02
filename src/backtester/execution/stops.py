@@ -27,9 +27,10 @@ class StopManager:
     can mutate portfolio state directly (same-day execution, bypassing broker).
     """
 
-    def __init__(self, stop_config: StopConfig | None, fee_model: FeeModel):
+    def __init__(self, stop_config: StopConfig | None, fee_model: FeeModel, lot_method: str = "fifo"):
         self._config = stop_config
         self._fees = fee_model
+        self._lot_method = lot_method
 
     def set_stops_for_fills(self, fills, today_data: dict[str, pd.Series],
                             portfolio: Portfolio) -> None:
@@ -193,7 +194,7 @@ class StopManager:
                 portfolio.close_position(symbol)
                 logger.debug(f"Short stop triggered ({reason}): {symbol} @ {price:.2f}")
             else:
-                # Close the long position (original logic)
+                # Close the long position using configured lot method
                 qty = pos.total_quantity
                 commission = self._fees.compute(
                     Order(symbol=symbol, side=Side.SELL, quantity=qty,
@@ -201,7 +202,14 @@ class StopManager:
                     price, qty
                 )
                 avg_cost = pos.avg_entry_price
-                trades = pos.sell_lots_fifo(qty, price, day, commission)
+                if self._lot_method == "lifo":
+                    trades = pos.sell_lots_lifo(qty, price, day, commission)
+                elif self._lot_method == "highest_cost":
+                    trades = pos.sell_lots_by_cost(qty, price, day, commission, highest_first=True)
+                elif self._lot_method == "lowest_cost":
+                    trades = pos.sell_lots_by_cost(qty, price, day, commission, highest_first=False)
+                else:
+                    trades = pos.sell_lots_fifo(qty, price, day, commission)
                 portfolio.trade_log.extend(trades)
                 portfolio.cash += price * qty - commission
                 portfolio.activity_log.append(TradeLogEntry(

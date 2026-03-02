@@ -72,6 +72,63 @@ class ATRSizer(PositionSizer):
         return min(shares, max_shares)
 
 
+class KellyCriterionSizer(PositionSizer):
+    """Kelly Criterion: f* = (win_rate * payoff - (1-win_rate)) / payoff.
+
+    Reads ``kelly_win_rate`` and ``kelly_payoff_ratio`` from the
+    indicator row. Falls back to FixedFractional when these are
+    unavailable.  Uses ``fraction`` (default 0.5 = half-Kelly) to
+    dampen the raw Kelly sizing.
+    """
+
+    def __init__(self, fraction: float = 0.5):
+        self._fraction = fraction
+
+    def compute(self, symbol, price, row, equity, cash, max_alloc_pct) -> int:
+        if price <= 0:
+            return 0
+        win_rate = row.get("kelly_win_rate")
+        payoff = row.get("kelly_payoff_ratio")
+        if (win_rate is None or payoff is None
+                or pd.isna(win_rate) or pd.isna(payoff) or payoff <= 0):
+            target = min(equity * max_alloc_pct, cash)
+            return int(target // price)
+        f_star = (win_rate * payoff - (1 - win_rate)) / payoff
+        if f_star <= 0:
+            return 0
+        alloc = f_star * self._fraction
+        alloc = min(alloc, max_alloc_pct)
+        target = min(equity * alloc, cash)
+        return int(target // price)
+
+
+class RiskParitySizer(PositionSizer):
+    """Inverse-volatility position sizing.
+
+    target_value = equity * target_risk / daily_vol
+    Uses ATR as a vol proxy. Falls back to FixedFractional when ATR
+    is unavailable.
+    """
+
+    def __init__(self, target_vol: float = 0.10):
+        self._target_vol = target_vol
+
+    def compute(self, symbol, price, row, equity, cash, max_alloc_pct) -> int:
+        if price <= 0:
+            return 0
+        atr_val = row.get("ATR")
+        if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
+            target = min(equity * max_alloc_pct, cash)
+            return int(target // price)
+        daily_vol = atr_val / price
+        annual_vol = daily_vol * (252 ** 0.5)
+        if annual_vol <= 0:
+            return 0
+        target_value = equity * (self._target_vol / annual_vol)
+        target_value = min(target_value, equity * max_alloc_pct, cash)
+        return int(target_value // price)
+
+
 class VolatilityParity(PositionSizer):
     """Weight positions inversely proportional to realized volatility.
 

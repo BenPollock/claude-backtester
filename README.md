@@ -4,22 +4,36 @@ A modular, research-grade stock backtesting engine in Python. Supports pluggable
 
 ## Features
 
-- **Pluggable strategies** — SMA Crossover and Rule-Based strategies included, with an ABC for custom strategies
+- **Pluggable strategies** — SMA Crossover and Rule-Based strategies included, plus a cross-sectional strategy ABC for universe ranking
 - **Lookahead-free execution** — Signals use close of day T; orders fill at open of T+1
 - **Regime filtering** — Engine-level benchmark SMA filter suppresses BUY signals in unfavorable regimes
-- **Position sizing models** — Fixed fractional, ATR-based, and volatility parity
-- **Risk management** — Stop-loss, take-profit, and trailing stop (fixed or ATR-based)
-- **Short selling** — SHORT/COVER signals, negative positions, margin tracking, borrow cost accrual
-- **Limit orders** — Limit price fills within H/L range, DAY and GTC time-in-force, expiry dates
+- **Position sizing models** — Fixed fractional, ATR-based, volatility parity, Kelly criterion, and risk parity
+- **Risk management** — Stop-loss, take-profit, trailing stop (fixed or ATR-based), drawdown kill switch, VaR/CVaR
+- **Exposure controls** — Sector exposure limits, gross/net exposure limits, portfolio-level volatility targeting
+- **Short selling** — SHORT/COVER signals, negative positions, margin tracking, borrow cost deduction from cash
+- **Order types** — Market, limit (DAY/GTC), stop, stop-limit, and bracket/OCO orders
+- **Execution realism** — Partial fills with volume constraints, fill price models (open/close/VWAP/random), square-root market impact (Almgren-Chriss)
 - **Realistic fee models** — Flat per-trade, percentage (bps), tiered, SEC fee, TAF fee, and composite fee stacking
+- **Lot accounting** — FIFO (default), LIFO, highest-cost, and lowest-cost lot selection
 - **Multi-timeframe data** — Strategies can access weekly/monthly resampled data alongside daily bars
-- **Parameter optimization** — Grid search across strategy parameters with configurable objective metric
-- **Walk-forward analysis** — Rolling or anchored in-sample/out-of-sample optimization windows
+- **Multi-source data** — Yahoo Finance, CSV files, or Parquet files as data sources
+- **Fundamental data** — Point-in-time fundamental data sidecar with binary search lookups
+- **Survivorship-bias-free universes** — Historical universe membership via CSV snapshots
+- **Corporate actions** — Configurable price adjustment (none, splits, splits + dividends), delisting detection with auto-close
+- **Dividend reinvestment** — DRIP support for automatic reinvestment
+- **Parameter optimization** — Grid search and Bayesian optimization (scikit-optimize) with parallel execution
+- **Walk-forward analysis** — Rolling or anchored in-sample/out-of-sample windows, purged K-fold cross-validation
+- **Overfitting detection** — Deflated Sharpe Ratio (Bailey & Lopez de Prado), permutation significance tests
 - **Multi-strategy portfolios** — Run multiple strategies simultaneously with capital allocation and attribution
 - **Monte Carlo simulation** — Statistical confidence intervals on backtest results
+- **Result persistence** — Save/load backtest results to disk, side-by-side comparison
+- **Stress testing** — Run strategy across historical crisis periods (dot-com, GFC, COVID, etc.)
+- **Target-weight rebalancing** — Rebalance to target portfolio weights on configurable schedules (daily/weekly/monthly/quarterly)
 - **Multi-market universes** — US, Canadian, or combined ticker universes (index constituents or full market)
-- **Data caching** — Parquet-based local cache with Yahoo Finance as the data source
-- **Professional analytics** — CAGR, Sharpe, max drawdown, monthly returns, HTML tearsheets, regime analysis, signal decay, correlation/concentration metrics
+- **Data caching** — Parquet-based local cache with Yahoo Finance as default data source
+- **Professional analytics** — CAGR, Sharpe, Sortino, max drawdown, VaR, CVaR, Omega, Treynor, MAE/MFE, turnover, TCA, capacity estimation, monthly returns, HTML tearsheets, regime analysis, signal decay, correlation/concentration metrics
+- **TOML config files** — Load all settings from a TOML file, with CLI overrides
+- **Progress bars** — tqdm progress indicators for backtest loops and parameter sweeps
 
 ## Requirements
 
@@ -31,6 +45,9 @@ A modular, research-grade stock backtesting engine in Python. Supports pluggable
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+
+# For Bayesian optimization (optional)
+pip install -e ".[optimize]"
 ```
 
 ## Examples
@@ -93,7 +110,7 @@ backtester run \
   --take-profit-atr 4.0
 ```
 
-Risk 1% of capital per trade. Stop placed 2× ATR from entry, target at 4× ATR.
+Risk 1% of capital per trade. Stop placed 2x ATR from entry, target at 4x ATR.
 
 ---
 
@@ -257,11 +274,316 @@ Sizes positions so each contributes roughly equal volatility (10% target annuali
 
 ---
 
+### 14. Drawdown kill switch with risk reporting
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --max-drawdown 0.15 \
+  --report-risk
+```
+
+Halts all trading if portfolio drawdown exceeds 15%. The `--report-risk` flag adds VaR and CVaR to the output.
+
+---
+
+### 15. Square-root market impact slippage
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --slippage-model sqrt \
+  --slippage-impact 0.1
+```
+
+Applies Almgren-Chriss square-root market impact: larger orders incur superlinear slippage based on order size relative to volume.
+
+---
+
+### 16. Partial fills with volume constraints
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --max-volume-pct 0.05 \
+  --partial-fill-policy requeue
+```
+
+Limits fills to 5% of daily volume. Unfilled remainder is requeued for the next day (`cancel` discards it instead).
+
+---
+
+### 17. Fill price model — VWAP fills
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --fill-price vwap
+```
+
+Fill market orders at estimated VWAP instead of the open. Options: `open` (default), `close`, `vwap`, `random` (uniform within day's range).
+
+---
+
+### 18. Kelly criterion position sizing
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --position-sizing kelly \
+  --kelly-fraction 0.5
+```
+
+Sizes positions using half-Kelly criterion. Falls back to fixed fractional when win rate / payoff data is unavailable.
+
+---
+
+### 19. Exposure limits and sector constraints
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL,JPM,GS,XOM \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --max-gross-exposure 1.5 \
+  --max-net-exposure 1.0 \
+  --max-sector-exposure 0.30 \
+  --sector-map sectors.csv
+```
+
+Limits gross exposure to 150% of equity, net exposure to 100%, and any single sector to 30%. The sector map CSV has columns `symbol,sector`.
+
+---
+
+### 20. Portfolio volatility targeting
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --target-portfolio-vol 0.10 \
+  --portfolio-vol-lookback 60
+```
+
+Scales all position sizes to target 10% annualized portfolio volatility using a 60-day lookback. Scale factor is capped at 2x.
+
+---
+
+### 21. Transaction cost analysis and trade analytics
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --report-tca \
+  --report-mae-mfe
+```
+
+Prints transaction cost analysis (turnover, cost attribution, capacity estimate) and per-trade MAE/MFE (Maximum Adverse/Favorable Excursion).
+
+---
+
+### 22. Overfitting detection
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --trials 50 \
+  --permutation-test 1000
+```
+
+Computes the Deflated Sharpe Ratio (adjusted for multiple testing with 50 trials) and runs a 1000-permutation significance test on the strategy's returns.
+
+---
+
+### 23. Bayesian optimization with parallel workers
+
+```bash
+backtester optimize \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2001-01-01 --end 2015-12-31 \
+  --grid '{"sma_fast":[20,200],"sma_slow":[100,400]}' \
+  --optimize-method bayesian \
+  --n-trials 50 \
+  --workers 4
+```
+
+Uses Gaussian process optimization (scikit-optimize) to explore the parameter space in 50 trials. Grid bounds define the search range. `--workers 4` parallelizes grid search across 4 processes.
+
+---
+
+### 24. Purged K-fold cross-validation
+
+```bash
+backtester walk-forward \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2001-01-01 --end 2023-12-31 \
+  --grid '{"sma_fast":[20,50,100],"sma_slow":[100,200,300]}' \
+  --cv-method purged_kfold \
+  --purge-days 10 \
+  --embargo-days 5
+```
+
+Splits the date range into K contiguous folds with purge gaps (10 days) and embargo periods (5 days) around test boundaries to prevent data leakage.
+
+---
+
+### 25. Survivorship-bias-free universe
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL,ENRON \
+  --benchmark SPY \
+  --start 2000-01-01 --end 2005-12-31 \
+  --universe-file historical_members.csv
+```
+
+The universe file (CSV with `date,symbol` columns) defines which tickers are tradeable on each date. Prevents trading delisted stocks outside their membership window.
+
+---
+
+### 26. CSV/Parquet data sources
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2020-12-31 \
+  --data-source csv \
+  --data-path ./my_data/
+```
+
+Loads OHLCV data from `./my_data/SPY.csv` instead of Yahoo Finance. Parquet files work the same way with `--data-source parquet`. CSV files must have columns: Date, Open, High, Low, Close, Volume.
+
+---
+
+### 27. Save results and compare runs
+
+```bash
+# Save two parameter runs
+backtester run \
+  --strategy sma_crossover --tickers SPY --benchmark SPY \
+  --start 2010-01-01 --end 2020-12-31 \
+  --params '{"sma_fast":50,"sma_slow":200}' \
+  --save-results results/run_50_200
+
+backtester run \
+  --strategy sma_crossover --tickers SPY --benchmark SPY \
+  --start 2010-01-01 --end 2020-12-31 \
+  --params '{"sma_fast":100,"sma_slow":300}' \
+  --save-results results/run_100_300
+
+# Compare side-by-side
+backtester compare results/run_50_200 results/run_100_300
+```
+
+Saves config, metrics, equity curve, and trades as JSON/Parquet. The `compare` command prints a side-by-side metric table.
+
+---
+
+### 28. Stress testing across historical crises
+
+```bash
+backtester stress-test \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 1998-01-01 --end 2023-12-31 \
+  --scenario dot_com_crash \
+  --scenario gfc_2008 \
+  --scenario covid_crash
+```
+
+Runs the strategy across specific crisis periods and reports per-scenario metrics. Built-in scenarios: `dot_com_crash`, `gfc_2008`, `flash_crash_2010`, `taper_tantrum_2013`, `china_deval_2015`, `volmageddon_2018`, `covid_crash`, `rate_hike_2022`.
+
+---
+
+### 29. Monthly rebalance schedule
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers AAPL,MSFT,GOOGL,AMZN \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --rebalance-schedule monthly
+```
+
+Generates signals only on month boundaries. On non-rebalance days, the engine still processes fills and updates prices but skips signal generation. Options: `daily` (default), `weekly`, `monthly`, `quarterly`.
+
+---
+
+### 30. LIFO lot accounting
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --lot-method lifo
+```
+
+Sells the most recently purchased lots first. Options: `fifo` (default), `lifo`, `highest_cost`, `lowest_cost`.
+
+---
+
+### 31. TOML config file
+
+```bash
+backtester run --config-file my_backtest.toml --tickers AAPL
+```
+
+Load all settings from a TOML file. CLI arguments override file values. Example `my_backtest.toml`:
+
+```toml
+strategy = "sma_crossover"
+benchmark = "SPY"
+start = "2010-01-01"
+end = "2023-12-31"
+cash = 50000
+max_positions = 10
+stop_loss_pct = 0.05
+take_profit_pct = 0.20
+fee_model = "composite_us"
+```
+
+---
+
 ## Advanced Examples
 
-The examples below cover advanced CLI flag combinations and Python-API-only features (limit orders, multi-timeframe strategies, multi-strategy portfolios).
+The examples below cover Python-API-only features (limit orders, multi-timeframe strategies, multi-strategy portfolios, cross-sectional strategies, fundamental data).
 
-### 14. Short selling with stops and regime filter
+### 32. Short selling with stops and regime filter
 
 ```bash
 backtester run \
@@ -283,7 +605,7 @@ Combines short selling (2% borrow cost, 150% margin) with risk management (5% st
 
 ---
 
-### 15. Limit orders — use Signal dataclass in custom strategies
+### 33. Limit orders — use Signal dataclass in custom strategies
 
 ```python
 from backtester.strategies.base import Signal
@@ -303,7 +625,109 @@ BUY limit orders fill when the day's Low reaches the limit price. SELL limits fi
 
 ---
 
-### 16. Realistic fee models — percentage, tiered, and regulatory fees
+### 34. Stop orders via Signal dataclass
+
+```python
+from backtester.strategies.base import Signal
+from backtester.types import SignalAction, OrderType
+
+class MyStrategy(Strategy):
+    def generate_signals(self, row, portfolio_state):
+        return Signal(
+            action=SignalAction.SELL,
+            order_type=OrderType.STOP,
+            stop_price=row["Close"] * 0.95,  # trigger at 5% below close
+        )
+```
+
+Stop orders trigger when the day's Low crosses the stop price (for sells) or High crosses it (for buys). `STOP_LIMIT` orders require both a trigger and a fill price.
+
+---
+
+### 35. Cross-sectional strategy — rank and select from universe
+
+```python
+from backtester.strategies.base import CrossSectionalStrategy
+from backtester.types import SignalAction
+
+class MomentumRank(CrossSectionalStrategy):
+    name = "momentum_rank"
+
+    def compute_indicators(self, df, timeframe_data=None):
+        df = df.copy()
+        df["return_60d"] = df["Close"].pct_change(60)
+        return df
+
+    def rank_universe(self, bar_data, positions, portfolio_state, benchmark_row=None):
+        scores = {}
+        for symbol, row in bar_data.items():
+            ret = row.get("return_60d")
+            if ret is not None and not pd.isna(ret):
+                scores[symbol] = ret
+
+        top = self.top_n(scores, 5)
+        signals = [(s, SignalAction.BUY) for s in top]
+
+        # Sell anything no longer in top 5
+        for symbol in positions:
+            if symbol not in top:
+                signals.append((symbol, SignalAction.SELL))
+
+        return signals
+```
+
+Cross-sectional strategies see all symbols at once and return a list of `(symbol, signal)` tuples. The engine dispatches to `rank_universe()` instead of the per-symbol `generate_signals()` loop.
+
+---
+
+### 36. Fundamental data in strategies
+
+```python
+class ValueStrategy(Strategy):
+    name = "value"
+
+    def generate_signals(self, row, portfolio_state):
+        pe = self.get_fundamental(row.name if hasattr(row, 'name') else "AAPL", "PE", row["date"])
+        if pe is not None and pe < 15:
+            return SignalAction.BUY
+        return SignalAction.HOLD
+```
+
+```bash
+backtester run \
+  --strategy value \
+  --tickers AAPL,MSFT \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --fundamental-data fundamentals.csv
+```
+
+The fundamental data CSV has columns `date,symbol,field,value`. Point-in-time lookups use binary search — data reported on March 15 is not visible before March 15.
+
+---
+
+### 37. Target-weight rebalancing strategy
+
+```python
+class EqualWeight(Strategy):
+    name = "equal_weight"
+
+    def target_weights(self, bar_data, portfolio_state, benchmark_row=None):
+        symbols = list(bar_data.keys())
+        if not symbols:
+            return None
+        w = 1.0 / len(symbols)
+        return {s: w for s in symbols}
+
+    def generate_signals(self, row, portfolio_state):
+        return SignalAction.HOLD  # not used when target_weights returns non-None
+```
+
+When a strategy returns target weights, the engine computes delta orders to rebalance (sells first to free cash, then buys). Combine with `--rebalance-schedule monthly` for calendar-based rebalancing.
+
+---
+
+### 38. Realistic fee models — percentage, tiered, and regulatory fees
 
 **Percentage fees** — charge 5 basis points on notional value:
 
@@ -345,7 +769,7 @@ Fee models follow the `FeeModel` ABC. Use `CompositeFee` to stack multiple model
 
 ---
 
-### 17. Multi-timeframe strategy — weekly trend + daily entry
+### 39. Multi-timeframe strategy — weekly trend + daily entry
 
 ```python
 class WeeklyTrendDaily(Strategy):
@@ -376,22 +800,7 @@ The engine automatically resamples daily OHLCV to weekly/monthly bars (Open=firs
 
 ---
 
-### 18. Generate an HTML tearsheet
-
-```bash
-backtester run \
-  --strategy sma_crossover \
-  --tickers SPY \
-  --benchmark SPY \
-  --start 2010-01-01 --end 2023-12-31 \
-  --tearsheet my_tearsheet.html
-```
-
-Produces a self-contained HTML file (no external dependencies) with: equity curve, drawdown chart, rolling metrics, monthly returns heatmap, trade statistics, and key metrics table. Open in any browser.
-
----
-
-### 19. Multi-strategy portfolio — run strategies side by side
+### 40. Multi-strategy portfolio — run strategies side by side
 
 ```python
 from backtester.research.multi_strategy import (
@@ -420,52 +829,6 @@ for name, metrics in result.per_strategy_metrics.items():
 ```
 
 Each strategy runs independently with its allocated share of capital. The combined equity curve is the sum of individual curves. Attribution analysis shows each strategy's contribution to total return.
-
----
-
-### 20. Signal decay analysis — find optimal holding period
-
-```bash
-backtester run \
-  --strategy sma_crossover \
-  --tickers SPY \
-  --benchmark SPY \
-  --start 2010-01-01 --end 2023-12-31 \
-  --report-signal-decay
-```
-
-Measures how entry signals perform over T+1 through T+N days. Identifies the horizon where average cumulative return peaks — useful for tuning holding periods.
-
----
-
-### 21. Regime performance breakdown
-
-```bash
-backtester run \
-  --strategy sma_crossover \
-  --tickers AAPL,MSFT,GOOGL \
-  --benchmark SPY \
-  --start 2010-01-01 --end 2023-12-31 \
-  --report-regime
-```
-
-Classifies each trading day as bull/bear/sideways (SMA-based) and low/medium/high volatility (rolling realized vol percentiles), then computes return, Sharpe, and drawdown metrics for each regime.
-
----
-
-### 22. Correlation and concentration analysis
-
-```bash
-backtester run \
-  --strategy sma_crossover \
-  --tickers AAPL,MSFT,GOOGL \
-  --benchmark SPY \
-  --start 2015-01-01 --end 2023-12-31 \
-  --report-correlation \
-  --report-concentration
-```
-
-Prints the pairwise return correlation matrix across tickers and portfolio concentration metrics (HHI, effective N, position weights). Sector exposure analysis (`compute_sector_exposure`) requires a user-supplied sector map and is available via the Python API only.
 
 ---
 
@@ -506,18 +869,20 @@ backtester run \
 | `--max-alloc` | Max allocation per position (e.g. 0.10 = 10%) | `0.10` |
 | `--params` | Strategy parameters as JSON string | `{}` |
 | `--cache-dir` | Parquet data cache directory | `~/.backtester/cache` |
+| `--config-file` | Load config from TOML file (CLI overrides file values) | disabled |
 | **Fees & Slippage** | | |
 | `--fee-model` | Fee model: `per_trade`, `percentage`, `composite_us` | `per_trade` |
 | `--fee` | Fee amount: dollars for `per_trade`, basis points for `percentage`/`composite_us` | `0.05` |
-| `--slippage-model` | Slippage model: `fixed`, `volume` | `fixed` |
+| `--slippage-model` | Slippage model: `fixed`, `volume`, `sqrt` | `fixed` |
 | `--slippage-bps` | Slippage in basis points (for `fixed` model) | `10.0` |
-| `--slippage-impact` | Impact factor for `volume` slippage model | `0.1` |
+| `--slippage-impact` | Impact factor for `volume`/`sqrt` slippage model | `0.1` |
 | **Position Sizing** | | |
-| `--position-sizing` | Sizing model: `fixed_fractional`, `atr`, `vol_parity` | `fixed_fractional` |
+| `--position-sizing` | Sizing model: `fixed_fractional`, `atr`, `vol_parity`, `kelly`, `risk_parity` | `fixed_fractional` |
 | `--risk-pct` | Risk per trade for `atr` sizer (e.g. 0.01 = 1%) | `0.01` |
 | `--atr-multiple` | ATR multiple for stop distance in `atr` sizer | `2.0` |
 | `--vol-target` | Target annualized volatility for `vol_parity` sizer | `0.10` |
 | `--vol-lookback` | Lookback window (days) for `vol_parity` sizer | `20` |
+| `--kelly-fraction` | Fraction of Kelly for `kelly` sizer (0.5 = half-Kelly) | `0.5` |
 | **Stops** | | |
 | `--stop-loss` | Stop-loss as fraction (e.g. 0.05 = 5%) | disabled |
 | `--take-profit` | Take-profit as fraction (e.g. 0.20 = 20%) | disabled |
@@ -533,17 +898,46 @@ backtester run \
 | `--allow-short` | Enable short selling (flag) | `false` |
 | `--short-borrow-rate` | Annualized short borrow rate | `0.02` |
 | `--margin-requirement` | Initial margin requirement (1.5 = 150%) | `1.5` |
+| **Data** | | |
+| `--data-source` | Data source: `yahoo`, `csv`, `parquet` | `yahoo` |
+| `--data-path` | Path to data directory for CSV/Parquet sources | disabled |
+| `--universe-file` | CSV with `date,symbol` for historical universe membership | disabled |
+| `--adjust-prices` | Price adjustment: `none`, `splits`, `splits_and_dividends` | `splits` |
+| `--fundamental-data` | Path to fundamental data CSV | disabled |
+| **Execution Realism** | | |
+| `--fill-price` | Fill price model: `open`, `close`, `vwap`, `random` | `open` |
+| `--max-volume-pct` | Max fraction of daily volume fillable | `0.10` |
+| `--partial-fill-policy` | Unfilled remainder: `cancel`, `requeue` | `cancel` |
+| `--lot-method` | Lot accounting: `fifo`, `lifo`, `highest_cost`, `lowest_cost` | `fifo` |
+| **Risk Controls** | | |
+| `--max-drawdown` | Max drawdown before halting (e.g. 0.10 = 10%) | disabled |
+| `--max-sector-exposure` | Max weight per sector (e.g. 0.30 = 30%) | disabled |
+| `--sector-map` | CSV with `symbol,sector` columns | disabled |
+| `--max-gross-exposure` | Max gross exposure as fraction of equity | disabled |
+| `--max-net-exposure` | Max net exposure as fraction of equity | disabled |
+| `--target-portfolio-vol` | Target annualized portfolio volatility | disabled |
+| `--portfolio-vol-lookback` | Lookback days for portfolio vol computation | `60` |
+| **Portfolio** | | |
+| `--drip` | Enable dividend reinvestment (flag) | `false` |
+| `--rebalance-schedule` | Signal frequency: `daily`, `weekly`, `monthly`, `quarterly` | `daily` |
 | **Output & Analytics** | | |
 | `--export-log` | Export activity log to CSV file path | disabled |
 | `--tearsheet` | Generate HTML tearsheet at file path | disabled |
+| `--save-results` | Save results (config, metrics, equity, trades) to directory | disabled |
 | `--report-regime` | Print regime performance breakdown (flag) | `false` |
 | `--report-signal-decay` | Print signal decay analysis (flag) | `false` |
 | `--report-correlation` | Print correlation matrix (flag) | `false` |
+| `--report-concentration` | Print portfolio concentration / HHI (flag) | `false` |
+| `--report-risk` | Print VaR/CVaR risk metrics (flag) | `false` |
+| `--report-mae-mfe` | Print per-trade MAE/MFE analysis (flag) | `false` |
+| `--report-tca` | Print transaction cost analysis (flag) | `false` |
+| `--trials` | Number of trials for Deflated Sharpe Ratio | disabled |
+| `--permutation-test` | Number of permutations for significance test | disabled |
 | `--monte-carlo-runs` | Number of Monte Carlo simulations | `1000` |
 
 ### `backtester optimize`
 
-Run a parameter grid search to find optimal strategy settings.
+Run a parameter grid search or Bayesian optimization.
 
 ```bash
 backtester optimize \
@@ -556,12 +950,15 @@ backtester optimize \
   --metric sharpe_ratio
 ```
 
-Supports all common options from `backtester run` (core, fees, slippage, position sizing, stops, regime, short selling), plus:
+Supports all common options from `backtester run`, plus:
 
 | Option | Description | Default |
 |---|---|---|
 | `--grid` | Parameter grid as JSON (e.g. `{"sma_fast":[50,100]}`) | **required** |
 | `--metric` | Metric to optimize | `sharpe_ratio` |
+| `--optimize-method` | Method: `grid`, `bayesian` | `grid` |
+| `--n-trials` | Number of trials for Bayesian optimization | `50` |
+| `--workers` | Parallel workers for grid search | `1` |
 
 ### `backtester walk-forward`
 
@@ -580,7 +977,7 @@ backtester walk-forward \
   --anchored
 ```
 
-Supports all common options from `backtester run` (core, fees, slippage, position sizing, stops, regime, short selling), plus:
+Supports all common options from `backtester run`, plus:
 
 | Option | Description | Default |
 |---|---|---|
@@ -589,6 +986,41 @@ Supports all common options from `backtester run` (core, fees, slippage, positio
 | `--oos-months` | Out-of-sample window length in months | `3` |
 | `--anchored` | Use expanding (anchored) in-sample window (flag) | `false` |
 | `--metric` | Metric to optimize | `sharpe_ratio` |
+| `--cv-method` | Cross-validation: `walkforward`, `purged_kfold` | `walkforward` |
+| `--purge-days` | Purge gap in days for purged K-fold | `10` |
+| `--embargo-days` | Embargo gap in days for purged K-fold | `5` |
+
+### `backtester stress-test`
+
+Run strategy across historical crisis periods.
+
+```bash
+backtester stress-test \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 1998-01-01 --end 2023-12-31 \
+  --scenario dot_com_crash \
+  --scenario gfc_2008
+```
+
+Supports all common options from `backtester run`, plus:
+
+| Option | Description | Default |
+|---|---|---|
+| `--scenario` | Stress scenario name (repeatable) | all scenarios |
+
+Built-in scenarios: `dot_com_crash`, `gfc_2008`, `flash_crash_2010`, `taper_tantrum_2013`, `china_deval_2015`, `volmageddon_2018`, `covid_crash`, `rate_hike_2022`.
+
+### `backtester compare`
+
+Compare saved backtest results side-by-side.
+
+```bash
+backtester compare results/run_a results/run_b
+```
+
+Prints a metric comparison table across two or more saved result directories.
 
 ### `backtester list-strategies`
 
@@ -606,30 +1038,34 @@ src/backtester/
   engine.py           — Main backtest loop (orchestrates everything)
   config.py           — BacktestConfig, RegimeFilter, StopConfig dataclasses
   types.py            — Side, OrderType, OrderStatus, SignalAction enums
+  result.py           — BacktestResult with save/load/compare
   data/
-    manager.py        — DataManager, resample_ohlcv (daily → weekly/monthly)
+    manager.py        — DataManager, resample_ohlcv (daily -> weekly/monthly)
     cache.py          — ParquetCache for local OHLCV storage
     calendar.py       — TradingCalendar (NYSE-aware)
-    source.py         — YahooDataSource
-    universe.py       — Universe provider (S&P 500, TSX, etc.)
+    sources/          — DataSource ABC, YahooDataSource
+    csv_source.py     — CSVDataSource (load from CSV files)
+    parquet_source.py — ParquetDataSource (load from Parquet files)
+    fundamental.py    — FundamentalDataManager (point-in-time lookups)
+    universe.py       — Universe provider (S&P 500, TSX), HistoricalUniverse
   strategies/
-    base.py           — Strategy ABC, Signal dataclass (limit order support)
+    base.py           — Strategy ABC, CrossSectionalStrategy ABC, Signal dataclass
     registry.py       — Strategy auto-discovery and lookup
     indicators.py     — 18 vectorized indicator functions
     sma_crossover.py  — SMA crossover strategy
     rule_based.py     — Rule-based DSL strategy
   execution/
-    broker.py         — SimulatedBroker (market + limit fills, short selling)
-    slippage.py       — FixedSlippage, VolumeSlippage
+    broker.py         — SimulatedBroker (market/limit/stop/bracket fills, partial fills)
+    slippage.py       — FixedSlippage, VolumeSlippage, SqrtImpactSlippage
     fees.py           — PerTradeFee, PercentageFee, TieredFee, SECFee, TAFFee, CompositeFee
-    position_sizing.py — FixedFractional, ATRSizer, VolatilityParity
+    position_sizing.py — FixedFractional, ATRSizer, VolatilityParity, KellyCriterionSizer, RiskParitySizer
     stops.py          — StopManager (long + short stop/take-profit/trailing)
   portfolio/
-    portfolio.py      — Portfolio state, margin tracking
-    position.py       — Position with FIFO lots (long + short)
-    order.py          — Order (market/limit, DAY/GTC), Fill, Trade
+    portfolio.py      — Portfolio state, margin tracking, rebalance order computation
+    position.py       — Position with FIFO/LIFO/cost-based lots (long + short)
+    order.py          — Order (market/limit/stop/bracket, DAY/GTC), Fill, Trade
   analytics/
-    metrics.py        — CAGR, Sharpe, Sortino, drawdown, benchmark-relative metrics
+    metrics.py        — CAGR, Sharpe, Sortino, drawdown, VaR, CVaR, Omega, Treynor
     montecarlo.py     — Monte Carlo simulation
     report.py         — Console report output
     calendar.py       — Monthly returns, drawdown periods
@@ -637,16 +1073,21 @@ src/backtester/
     correlation.py    — Correlation matrix, HHI, sector exposure
     signal_decay.py   — Signal return attribution, optimal holding period
     regime.py         — Bull/bear/sideways classification, per-regime metrics
+    overfitting.py    — Deflated Sharpe Ratio, permutation significance test
+    trade_analysis.py — Per-trade MAE/MFE analysis
+    tca.py            — Turnover, cost attribution, capacity estimation
+    stress.py         — Historical stress test scenarios
   research/
-    optimizer.py      — Grid search parameter optimization
+    optimizer.py      — Grid search, Bayesian optimization, parallel execution
     walk_forward.py   — Walk-forward IS/OOS analysis
+    cross_validation.py — Purged K-fold cross-validation
     multi_strategy.py — Multi-strategy allocation, combined equity, attribution
 ```
 
 ## Testing
 
 ```bash
-pytest tests/ -v          # full suite (~492 tests)
+pytest tests/ -v          # full suite (588 tests)
 ```
 
 Run a single test:
