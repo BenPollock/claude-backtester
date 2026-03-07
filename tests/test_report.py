@@ -226,8 +226,9 @@ class TestPrintReport:
         metrics = print_report(result)
 
         captured = capsys.readouterr()
-        # Calmar should be printed as "inf" since drawdown is 0
-        assert "inf" in captured.out
+        # Calmar should be printed as a large finite number (99999.0) since
+        # inf values are clamped in compute_all_metrics
+        assert "99999" in captured.out or "inf" in captured.out
 
 
 # ── export_activity_log_csv tests ───────────────────────────────────

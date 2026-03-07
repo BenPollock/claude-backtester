@@ -130,6 +130,10 @@ class DataManager:
         # Reindex to trading calendar
         df = df.reindex(trading_days)
 
+        # Replace inf/-inf with NaN before forward-filling
+        import numpy as np
+        df = df.replace([np.inf, -np.inf], np.nan)
+
         # Forward-fill gaps up to MAX_FFILL_DAYS
         df = df.ffill(limit=MAX_FFILL_DAYS)
 
@@ -137,6 +141,9 @@ class DataManager:
         nan_count = df["Close"].isna().sum()
         if nan_count > 0:
             logger.warning(f"{symbol}: {nan_count} trading days with missing data after forward-fill")
+
+        # Drop rows missing Close price (essential for backtesting)
+        df = df.dropna(subset=["Close"])
 
         return df
 

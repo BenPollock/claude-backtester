@@ -206,8 +206,13 @@ class SimulatedBroker:
                         remaining_orders.append(remainder_order)
                     quantity = max_fillable
 
+            # Update order.quantity so slippage models use the resolved value
+            order.quantity = quantity
+
             # Apply slippage around the base fill price
             fill_price = self._slippage.compute(order, base_price, volume)
+            if fill_price < 0:
+                fill_price = 0.0
             commission = self._fees.compute(order, fill_price, abs(quantity))
 
             if order.side == Side.BUY:

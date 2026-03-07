@@ -144,6 +144,16 @@ class BacktestEngine:
         """Execute the full backtest and return results."""
         config = self.config
 
+        # Validate config
+        if config.end_date < config.start_date:
+            raise ValueError(
+                f"end_date ({config.end_date}) must be >= start_date ({config.start_date})"
+            )
+        if config.starting_cash <= 0:
+            raise ValueError(
+                f"starting_cash must be positive, got {config.starting_cash}"
+            )
+
         # 1. Load strategy
         strategy = get_strategy(config.strategy_name)
         strategy.configure(config.strategy_params)
@@ -162,6 +172,9 @@ class BacktestEngine:
 
         logger.info(f"Loading data for {len(tickers)} tickers...")
         universe_data = self._data.load_many(tickers, config.start_date, config.end_date)
+
+        # Filter out symbols with empty DataFrames (e.g. future date ranges)
+        universe_data = {s: df for s, df in universe_data.items() if len(df) > 0}
 
         if not universe_data:
             raise RuntimeError("No data loaded for any ticker")
@@ -243,6 +256,8 @@ class BacktestEngine:
             # a2. Set stop levels on newly opened positions
             if config.stop_config:
                 self._stop_mgr.set_stops_for_fills(fills, today_data, portfolio)
+                if config.allow_short:
+                    self._stop_mgr.set_stops_for_short_fills(fills, today_data, portfolio)
 
             # a3. Check stop triggers using intraday H/L
             if config.stop_config:
@@ -256,7 +271,9 @@ class BacktestEngine:
             for symbol, pos in portfolio.positions.items():
                 row = today_data.get(symbol)
                 if row is not None and not pd.isna(row.get("Close")):
-                    pos.update_market_price(row["Close"])
+                    close_val = row["Close"]
+                    if math.isfinite(close_val):
+                        pos.update_market_price(close_val)
 
             # b1. Accrue short borrow costs and deduct from cash (Gap 35)
             if config.allow_short and config.short_borrow_rate > 0:
@@ -325,6 +342,7 @@ class BacktestEngine:
                     benchmark_row = benchmark_data.loc[ts]
 
                 portfolio_state = portfolio.snapshot()
+                self._pending_new_positions: set[str] = set()
 
                 # Gap 4: Cross-sectional strategy dispatch
                 from backtester.strategies.base import CrossSectionalStrategy
@@ -443,18 +461,20 @@ class BacktestEngine:
         if signal == SignalAction.HOLD:
             return
 
-        # Check position limits for BUY
+        # Check position limits for BUY (include pending orders from this day)
+        pending = getattr(self, '_pending_new_positions', set())
+        current_count = portfolio_state.num_positions + len(pending)
         if signal == SignalAction.BUY:
-            if portfolio_state.num_positions >= config.max_positions:
+            if current_count >= config.max_positions:
                 return
-            if symbol in portfolio_state.position_symbols:
+            if symbol in portfolio_state.position_symbols or symbol in pending:
                 return
 
         # Check position limits for SHORT
         if signal == SignalAction.SHORT:
-            if portfolio_state.num_positions >= config.max_positions:
+            if current_count >= config.max_positions:
                 return
-            if symbol in portfolio_state.position_symbols:
+            if symbol in portfolio_state.position_symbols or symbol in pending:
                 return
 
         # Gap 18: Sector exposure limit check for BUY/SHORT
@@ -549,6 +569,9 @@ class BacktestEngine:
             reason=reason,
         )
         self._broker.submit_order(order)
+        if signal in (SignalAction.BUY, SignalAction.SHORT):
+            pending = getattr(self, '_pending_new_positions', set())
+            pending.add(symbol)
 
     def _process_rebalance(
         self, target_weights, today_data, portfolio, day, vol_scale=1.0,
@@ -703,8 +726,13 @@ class BacktestEngine:
         for symbol in list(portfolio.positions.keys()):
             pos = portfolio.positions[symbol]
             if pos.total_quantity > 0:
-                # Long position: sell at market price
+                # Long position: sell at market price (fall back to avg entry price)
                 price = pos._market_price
+                if price <= 0:
+                    price = pos.avg_entry_price
+                    logger.warning(
+                        f"Force-close {symbol}: no market price, using entry price ${price:.2f}"
+                    )
                 if price > 0:
                     trades = pos.sell_lots_fifo(pos.total_quantity, price, last_date, 0.0)
                     portfolio.trade_log.extend(trades)
@@ -712,8 +740,13 @@ class BacktestEngine:
                     portfolio.close_position(symbol)
                     logger.debug(f"Force-closed long {symbol}: {len(trades)} lots")
             elif pos.total_quantity < 0:
-                # Short position: cover at market price
+                # Short position: cover at market price (fall back to avg entry price)
                 price = pos._market_price
+                if price <= 0:
+                    price = pos.avg_entry_price
+                    logger.warning(
+                        f"Force-close short {symbol}: no market price, using entry price ${price:.2f}"
+                    )
                 if price > 0:
                     cover_qty = abs(pos.total_quantity)
                     trades = pos.close_lots_fifo(cover_qty, price, last_date, 0.0)

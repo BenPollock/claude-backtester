@@ -52,8 +52,11 @@ def max_drawdown(equity_series: pd.Series) -> float:
     if len(equity_series) < 2:
         return 0.0
     cummax = equity_series.cummax()
-    drawdown = (equity_series - cummax) / cummax
-    return drawdown.min()
+    if cummax.max() == 0:
+        return 0.0
+    drawdown = (equity_series - cummax) / cummax.replace(0, np.nan)
+    dd_min = drawdown.min()
+    return 0.0 if pd.isna(dd_min) else dd_min
 
 
 def max_drawdown_duration(equity_series: pd.Series) -> int:
@@ -88,7 +91,10 @@ def total_return(equity_series: pd.Series) -> float:
     """Total return as a fraction."""
     if len(equity_series) < 2:
         return 0.0
-    return equity_series.iloc[-1] / equity_series.iloc[0] - 1.0
+    start_val = equity_series.iloc[0]
+    if start_val == 0:
+        return 0.0
+    return equity_series.iloc[-1] / start_val - 1.0
 
 
 def win_rate(trades) -> float:
@@ -368,5 +374,11 @@ def compute_all_metrics(
         m["down_capture"] = capture_ratio(equity_series, benchmark_series, "down")
         # Treynor ratio (Gap 43)
         m["treynor_ratio"] = treynor_ratio(equity_series, benchmark_series, risk_free_rate)
+
+    # Clamp inf values to a finite sentinel for safe serialization/ranking
+    _MAX_RATIO = 99999.0
+    for k, v in m.items():
+        if isinstance(v, float) and (v == float('inf') or v == float('-inf')):
+            m[k] = _MAX_RATIO if v > 0 else -_MAX_RATIO
 
     return m
