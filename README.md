@@ -1087,10 +1087,26 @@ src/backtester/
 ## Testing
 
 ```bash
-pytest tests/ -v          # full suite (588 tests)
+pytest tests/ -v                    # full suite (773 tests)
+pytest tests/test_e2e.py -v         # E2E integration tests only (28 tests)
 ```
 
-Run a single test:
+### E2E Tests
+
+The E2E test suite (`tests/test_e2e.py`) runs full backtests through the entire pipeline — config, engine, strategy, broker, portfolio, and analytics — with only the data source mocked (no Yahoo Finance calls). These tests validate critical system invariants:
+
+- T+1 fill timing (no lookahead)
+- Cash accounting and equity curve correctness
+- Stop-loss, take-profit, and trailing stop execution
+- Regime filter signal suppression
+- Multi-ticker position limits and allocation caps
+- Fee and slippage impact on returns
+- FIFO lot accounting
+- Drawdown kill switch behavior
+
+### Unit Tests
+
+Run a single unit test:
 
 ```bash
 pytest tests/test_portfolio.py::TestPosition::test_sell_fifo -v

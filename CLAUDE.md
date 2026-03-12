@@ -72,10 +72,37 @@ src/backtester/
 - **Position sizing:** FIFO lot tracking in `position.py`
 - **Strategy pattern:** Subclass Strategy ABC; register via `registry.py`
 
+## Testing Strategy
+
+This project has two tiers of tests:
+
+1. **Unit tests** (`tests/test_*.py`) — test individual modules in isolation
+2. **E2E integration tests** (`tests/test_e2e.py`) — run full backtests through the entire pipeline with only the data source mocked
+
+**When writing tests, always consider whether an E2E test is appropriate in addition to (or instead of) a unit test.** E2E tests are preferred when:
+- The change affects the data flow across multiple modules (e.g., engine → broker → portfolio)
+- The change touches order execution, signal generation, or portfolio accounting
+- The change involves configuration options that alter engine behavior (stops, regime filter, fees, sizing)
+- You need to verify that an invariant holds end-to-end (e.g., no lookahead, cash accounting)
+
+E2E tests use `MockDataSource` + `make_controlled_df()` to create deterministic price data, and run full backtests via `BacktestEngine.run()`. See `tests/test_e2e.py` for patterns.
+
+```bash
+# Run all tests
+pytest tests/ -v
+
+# Run only E2E tests
+pytest tests/test_e2e.py -v
+
+# Run only unit tests (exclude E2E)
+pytest tests/ -v --ignore=tests/test_e2e.py
+```
+
 ## Test Files
 
 ```
 tests/
+  test_e2e.py             — E2E integration tests (full pipeline, 28 tests)
   test_portfolio.py       test_broker.py       test_engine.py
   test_strategies.py      test_metrics.py      test_montecarlo.py
   test_data.py            test_calendar.py     test_slippage.py

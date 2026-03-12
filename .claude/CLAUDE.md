@@ -82,14 +82,21 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 ## Test Approach
 
 ```bash
-pytest tests/ -v                                          # full suite
-pytest tests/test_portfolio.py::TestPosition::test_sell_fifo -v  # single test
+pytest tests/ -v                                          # full suite (773 tests)
+pytest tests/test_e2e.py -v                               # E2E integration tests (28 tests)
+pytest tests/test_portfolio.py::TestPosition::test_sell_fifo -v  # single unit test
 ```
+
+**Two test tiers:**
+1. **Unit tests** (`tests/test_*.py` excluding `test_e2e.py`) — test individual modules in isolation
+2. **E2E integration tests** (`tests/test_e2e.py`) — run full backtests through the complete pipeline (engine, strategy, broker, portfolio, analytics) with only the data source mocked
+
+**When to write E2E tests:** Always consider adding an E2E test when a change affects cross-module data flow (engine → broker → portfolio), order execution, signal generation, portfolio accounting, or configuration options that alter engine behavior (stops, regime filter, fees, sizing). E2E tests use `MockDataSource` + `make_controlled_df()` for deterministic price data and run full backtests via `BacktestEngine.run()`. See `tests/test_e2e.py` for patterns.
 
 **Key Fixtures** (`conftest.py`): `make_price_df(seed=42)` generates deterministic OHLCV; `MockDataSource` serves pre-loaded DataFrames; `basic_config` provides standard BacktestConfig; `sample_df` is 252-day synthetic data; `portfolio` is fresh $100k Portfolio.
 
 **Do not change:** conftest `discover_strategies()` call (registration), `make_price_df` seed=42, `basic_config` defaults, `MockDataSource` inclusive date filtering.
 
-**Coverage gaps:** Multi-timeframe strategies lack end-to-end integration tests with real indicator logic. Short selling `set_stops_for_short_fills()` is implemented but not wired into the engine's fill processing. Borrow cost is tracked but not auto-deducted from cash. Tearsheet visual correctness is not tested (only structural HTML checks).
+**Coverage gaps:** Multi-timeframe strategies lack end-to-end integration tests with real indicator logic. Tearsheet visual correctness is not tested (only structural HTML checks).
 
-**Test counts by area:** strategies (50), short selling (47), metrics (42), limit orders (39), fees extended (34), correlation (26), tearsheet (21), regime (21), multi-strategy (19), signal decay (17), position sizing (17), multi-timeframe (16), portfolio (15), calendar analytics (18), CLI (22), report (12), optimizer (12), stops (11), engine (9), broker (8), activity log (7), universe (7), data (6), slippage (4), Monte Carlo (4), calendar (3).
+**Test counts by area:** E2E integration (28), strategies (50), short selling (47), metrics (42), limit orders (39), fees extended (34), correlation (26), tearsheet (21), regime (21), multi-strategy (19), signal decay (17), position sizing (17), multi-timeframe (16), portfolio (15), calendar analytics (18), CLI (22), report (12), optimizer (12), stops (11), engine (9), broker (8), activity log (7), universe (7), data (6), slippage (4), Monte Carlo (4), calendar (3).
