@@ -294,18 +294,26 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
 
     # Gap 7: Overfitting metrics
     if trials:
-        from backtester.analytics.overfitting import deflated_sharpe_ratio
+        from backtester.analytics.overfitting import (
+            deflated_sharpe_ratio, estimate_sharpe_variance,
+        )
         observed = metrics.get("sharpe_ratio", 0)
         n_ret = len(result.equity_series)
+        returns = result.equity_series.pct_change().dropna().values
+        var_sharpes = estimate_sharpe_variance(returns)
         click.echo(f"\n=== Overfitting Analysis ===")
-        # Use variance 1.0 as placeholder (proper usage is in grid_search)
-        dsr = deflated_sharpe_ratio(observed, trials, 1.0, n_ret)
+        dsr = deflated_sharpe_ratio(observed, trials, var_sharpes, n_ret)
         click.echo(f"Deflated Sharpe Ratio: {dsr:.4f} (trials={trials})")
 
     if permutation_test:
         from backtester.analytics.overfitting import permutation_test as perm_test
-        result_perm = perm_test(result.equity_series, n_permutations=permutation_test)
-        click.echo(f"\n=== Permutation Test ===")
+        bm = result.benchmark_series
+        result_perm = perm_test(
+            result.equity_series,
+            n_permutations=permutation_test,
+            benchmark_series=bm,
+        )
+        click.echo(f"\n=== Permutation Test (sign-flip) ===")
         click.echo(f"Observed Sharpe: {result_perm['observed_sharpe']:.4f}")
         click.echo(f"P-value:         {result_perm['p_value']:.4f}")
 
@@ -641,6 +649,32 @@ def stress_test_cmd(strategy, tickers, benchmark, start, end, cash, max_position
     scenarios = list(scenario) if scenario else None
     results = run_stress_test(base_config, scenarios)
     print_stress_results(results)
+
+
+@cli.command("clear-cache")
+@click.option("--cache-dir", default="~/.backtester/cache", help="Data cache directory")
+@click.option("--ticker", default=None, help="Clear cache for a specific ticker only")
+@click.confirmation_option(prompt="This will delete cached market data. Continue?")
+def clear_cache(cache_dir, ticker):
+    """Clear the data cache (forces fresh download from source)."""
+    from pathlib import Path
+    cache_path = Path(cache_dir).expanduser()
+    if not cache_path.exists():
+        click.echo("Cache directory does not exist.")
+        return
+    if ticker:
+        target = cache_path / f"{ticker.upper()}.parquet"
+        if target.exists():
+            target.unlink()
+            click.echo(f"Cleared cache for {ticker.upper()}")
+        else:
+            click.echo(f"No cache file for {ticker.upper()}")
+    else:
+        count = 0
+        for f in cache_path.glob("*.parquet"):
+            f.unlink()
+            count += 1
+        click.echo(f"Cleared {count} cached files from {cache_path}")
 
 
 @cli.command("compare")

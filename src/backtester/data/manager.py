@@ -99,6 +99,11 @@ class DataManager:
         self._source = source or YahooDataSource()
         self._calendar = TradingCalendar()
 
+    # Minimum fraction of expected trading days that cached data must cover
+    # after reindexing. Below this threshold the cache is considered stale
+    # or polluted and the data is re-fetched from the source.
+    _MIN_CACHE_COVERAGE = 0.90
+
     def load(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         """Load OHLCV data for symbol, using cache when possible.
 
@@ -116,7 +121,24 @@ class DataManager:
             if cache_start <= first_needed and cache_end >= last_needed:
                 logger.info(f"Fetching {symbol} from cache")
                 df = self._cache.load(symbol)
-                return self._prepare(df, symbol, start, end)
+                prepared = self._prepare(df, symbol, start, end)
+
+                # Validate cache coverage: if the prepared data covers far
+                # fewer trading days than expected, the cache is likely
+                # polluted (e.g. by old test mock data).  Discard it and
+                # re-fetch from the source.
+                if len(trading_days) > 0:
+                    coverage = len(prepared) / len(trading_days)
+                    if coverage >= self._MIN_CACHE_COVERAGE:
+                        return prepared
+                    logger.warning(
+                        f"{symbol}: cache coverage {coverage:.0%} is below "
+                        f"{self._MIN_CACHE_COVERAGE:.0%} threshold "
+                        f"({len(prepared)}/{len(trading_days)} trading days). "
+                        f"Re-fetching from source."
+                    )
+                else:
+                    return prepared
 
         logger.info(f"Fetching {symbol} from source")
         df = self._source.fetch(symbol, start, end)

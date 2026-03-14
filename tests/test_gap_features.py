@@ -28,7 +28,9 @@ from backtester.strategies.registry import register_strategy
 from backtester.analytics.metrics import (
     historical_var, cvar, omega_ratio, treynor_ratio, compute_all_metrics,
 )
-from backtester.analytics.overfitting import deflated_sharpe_ratio, permutation_test
+from backtester.analytics.overfitting import (
+    deflated_sharpe_ratio, permutation_test, estimate_sharpe_variance,
+)
 from backtester.analytics.trade_analysis import compute_mae_mfe, mae_mfe_summary
 from backtester.analytics.tca import compute_turnover, compute_cost_attribution, estimate_capacity
 
@@ -314,6 +316,50 @@ class TestOverfittingMetrics:
         dsr = deflated_sharpe_ratio(2.0, 50, 0.5, 252)
         assert 0 <= dsr <= 1
 
+    def test_dsr_single_trial_positive_sharpe(self):
+        """With trials=1, a positive Sharpe should yield DSR > 0."""
+        dsr = deflated_sharpe_ratio(0.5, 1, 0.08, 3000)
+        assert dsr > 0.5, f"DSR should be high for positive Sharpe with 1 trial, got {dsr}"
+
+    def test_dsr_single_trial_negative_sharpe(self):
+        """With trials=1, a negative Sharpe should yield DSR near 0."""
+        dsr = deflated_sharpe_ratio(-0.5, 1, 0.08, 3000)
+        assert dsr < 0.01
+
+    def test_dsr_high_sharpe_survives_many_trials(self):
+        """A very high Sharpe should survive even with heavy multiple-testing penalty."""
+        dsr = deflated_sharpe_ratio(2.0, 50, 0.08, 3000)
+        assert dsr > 0.5
+
+    def test_dsr_low_sharpe_fails_many_trials(self):
+        """A modest Sharpe should not survive heavy multiple-testing penalty."""
+        dsr = deflated_sharpe_ratio(0.3, 100, 0.5, 252)
+        assert dsr < 0.5
+
+    def test_estimate_sharpe_variance_positive(self):
+        """Bootstrap variance estimate should be positive and finite."""
+        rng = np.random.default_rng(42)
+        returns = rng.normal(0.0003, 0.01, 1000)
+        var = estimate_sharpe_variance(returns)
+        assert var > 0
+        assert np.isfinite(var)
+
+    def test_estimate_sharpe_variance_decreases_with_more_data(self):
+        """More data points should reduce Sharpe estimation variance."""
+        rng = np.random.default_rng(42)
+        all_returns = rng.normal(0.0003, 0.01, 2000)
+        var_short = estimate_sharpe_variance(all_returns[:200], seed=42)
+        var_long = estimate_sharpe_variance(all_returns, seed=42)
+        assert var_long < var_short, (
+            f"More data should reduce variance: {var_long} vs {var_short}"
+        )
+
+    def test_estimate_sharpe_variance_short_series(self):
+        """Short series (< 10 returns) should return fallback value."""
+        returns = np.array([0.01, -0.01, 0.005])
+        var = estimate_sharpe_variance(returns)
+        assert var == 1.0
+
     def test_permutation_random_strategy(self):
         """Random walk should have high p-value (not significant)."""
         rng = np.random.default_rng(42)
@@ -323,6 +369,78 @@ class TestOverfittingMetrics:
 
         result = permutation_test(equity, n_permutations=200, seed=42)
         assert result["p_value"] > 0.01  # random walk should not be significant
+
+    def test_permutation_sign_flip_varies_sharpe(self):
+        """Sign-flip should produce varying Sharpe values, not all identical."""
+        rng = np.random.default_rng(42)
+        # Strategy with clear positive drift
+        prices = 100 * np.cumprod(1 + rng.normal(0.001, 0.01, 500))
+        idx = pd.bdate_range("2020-01-02", periods=500)
+        equity = pd.Series(prices, index=idx)
+
+        result = permutation_test(equity, n_permutations=100, seed=42)
+        null_sharpes = np.array(result["null_sharpes"])
+        # Null Sharpes should not all be identical (the old bug)
+        assert null_sharpes.std() > 0.1, (
+            f"Null Sharpes have std={null_sharpes.std():.4f}, "
+            "sign-flip should produce varying values"
+        )
+
+    def test_permutation_strong_strategy_low_pvalue(self):
+        """A strategy with strong positive drift should get low p-value."""
+        rng = np.random.default_rng(42)
+        # Very strong daily drift (0.3% per day)
+        prices = 100 * np.cumprod(1 + rng.normal(0.003, 0.005, 500))
+        idx = pd.bdate_range("2020-01-02", periods=500)
+        equity = pd.Series(prices, index=idx)
+
+        result = permutation_test(equity, n_permutations=200, seed=42)
+        assert result["p_value"] < 0.05, (
+            f"Strong strategy should be significant, got p={result['p_value']}"
+        )
+
+    def test_permutation_with_benchmark_excess_returns(self):
+        """When benchmark is provided, test should use excess returns."""
+        rng = np.random.default_rng(42)
+        idx = pd.bdate_range("2020-01-02", periods=500)
+
+        # Strategy that exactly tracks benchmark (no alpha)
+        benchmark_prices = 100 * np.cumprod(1 + rng.normal(0.0004, 0.01, 500))
+        benchmark = pd.Series(benchmark_prices, index=idx)
+        # Strategy = benchmark + tiny noise (no real alpha)
+        strategy_prices = benchmark_prices * (1 + rng.normal(0, 0.001, 500))
+        strategy = pd.Series(strategy_prices, index=idx)
+
+        result = permutation_test(
+            strategy, n_permutations=200, seed=42, benchmark_series=benchmark,
+        )
+        # No alpha, so p-value should be high
+        assert result["p_value"] > 0.05
+
+    def test_permutation_with_benchmark_alpha_detected(self):
+        """Strategy with consistent alpha over benchmark should get low p-value."""
+        rng = np.random.default_rng(42)
+        idx = pd.bdate_range("2020-01-02", periods=500)
+
+        benchmark_rets = rng.normal(0.0003, 0.01, 500)
+        benchmark = pd.Series(100 * np.cumprod(1 + benchmark_rets), index=idx)
+        # Strategy = benchmark returns + 0.2% daily alpha
+        strategy_rets = benchmark_rets + 0.002
+        strategy = pd.Series(100 * np.cumprod(1 + strategy_rets), index=idx)
+
+        result = permutation_test(
+            strategy, n_permutations=200, seed=42, benchmark_series=benchmark,
+        )
+        assert result["p_value"] < 0.05, (
+            f"Strategy with alpha should be significant, got p={result['p_value']}"
+        )
+
+    def test_permutation_short_series(self):
+        """Very short equity series should return p_value=1.0."""
+        equity = pd.Series([100.0], index=pd.bdate_range("2020-01-02", periods=1))
+        result = permutation_test(equity, n_permutations=100)
+        assert result["p_value"] == 1.0
+        assert result["observed_sharpe"] == 0.0
 
 
 # =====================================================================

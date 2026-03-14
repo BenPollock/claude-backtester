@@ -1022,6 +1022,28 @@ backtester compare results/run_a results/run_b
 
 Prints a metric comparison table across two or more saved result directories.
 
+### `backtester clear-cache`
+
+Clear the local data cache to force fresh downloads from the data source.
+
+```bash
+# Clear all cached data
+backtester clear-cache
+
+# Clear cache for a specific ticker
+backtester clear-cache --ticker SPY
+
+# Use a custom cache directory
+backtester clear-cache --cache-dir /path/to/cache
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--ticker` | Clear cache for a specific ticker only | all tickers |
+| `--cache-dir` | Data cache directory | `~/.backtester/cache` |
+
+**Automatic cache validation:** The engine automatically detects stale or polluted cache data. If cached data covers less than 90% of the expected trading days for a query, it is discarded and re-fetched from the source. A warning is logged when this occurs.
+
 ### `backtester list-strategies`
 
 List all registered strategies.

@@ -1,7 +1,7 @@
 """Overfitting detection metrics (Gap 7).
 
 - Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014)
-- Permutation test for strategy significance
+- Permutation test for strategy significance (sign-flip method)
 """
 
 import math
@@ -35,8 +35,23 @@ def deflated_sharpe_ratio(
         DSR value between 0 and 1. Higher means less likely to be
         due to overfitting.
     """
-    if num_trials <= 1 or variance_of_sharpes <= 0 or n_returns <= 1:
+    if n_returns <= 1:
         return 0.0
+    if variance_of_sharpes <= 0:
+        return 0.0
+
+    if num_trials <= 1:
+        # No multiple-testing penalty: test if observed Sharpe is
+        # significantly above zero using its standard error.
+        se = math.sqrt(
+            (1 + 0.5 * observed_sharpe ** 2
+             - skewness * observed_sharpe
+             + ((kurtosis - 3) / 4) * observed_sharpe ** 2)
+            / (n_returns - 1)
+        )
+        if se <= 0:
+            return 0.0
+        return _norm_cdf(observed_sharpe / se)
 
     # Expected max Sharpe from N iid normal draws (Euler-Mascheroni approx)
     euler_mascheroni = 0.5772156649
@@ -61,42 +76,87 @@ def deflated_sharpe_ratio(
     return _norm_cdf(z)
 
 
+def estimate_sharpe_variance(returns: np.ndarray, n_bootstraps: int = 500,
+                             seed: int = 42) -> float:
+    """Estimate variance of Sharpe ratio via bootstrap resampling.
+
+    Resamples daily returns with replacement to generate a distribution
+    of Sharpe ratios, then returns the variance of that distribution.
+    """
+    if len(returns) < 10:
+        return 1.0
+    rng = np.random.default_rng(seed)
+    sharpes = []
+    n = len(returns)
+    for _ in range(n_bootstraps):
+        sample = rng.choice(returns, size=n, replace=True)
+        sharpes.append(_sharpe_from_returns(sample))
+    return float(np.var(sharpes))
+
+
 def permutation_test(
     equity_series: pd.Series,
     n_permutations: int = 1000,
     seed: int = 42,
+    benchmark_series: pd.Series | None = None,
 ) -> dict:
-    """Permutation test for strategy significance.
+    """Sign-flip permutation test for strategy significance.
 
-    Shuffles daily returns N times, recomputes Sharpe each time,
-    returns p-value = fraction of null Sharpes >= observed Sharpe.
+    Tests whether the strategy generates returns significantly different
+    from zero (or significantly above benchmark when provided).
+
+    The previous implementation shuffled daily returns, but Sharpe ratio
+    (mean/std * sqrt(252)) is invariant to shuffling because both mean
+    and std are preserved. This fix uses a sign-flip test: under the null
+    hypothesis of no edge, daily returns should be symmetric around zero.
+    Randomly flipping signs changes the mean while preserving std,
+    producing a proper null distribution.
+
+    When a benchmark series is provided, tests excess returns
+    (strategy - benchmark) instead of raw returns.
 
     Args:
         equity_series: Daily equity curve.
-        n_permutations: Number of random shuffles.
+        n_permutations: Number of sign-flip iterations.
         seed: Random seed for reproducibility.
+        benchmark_series: Optional benchmark equity curve for excess
+            return testing.
 
     Returns:
         Dict with 'observed_sharpe', 'p_value', 'null_sharpes'.
     """
-    returns = equity_series.pct_change().dropna().values
-    if len(returns) < 2:
+    strategy_returns = equity_series.pct_change().dropna()
+
+    if len(strategy_returns) < 2:
         return {"observed_sharpe": 0.0, "p_value": 1.0, "null_sharpes": []}
+
+    if benchmark_series is not None:
+        # Test excess returns (alpha) over benchmark
+        benchmark_returns = benchmark_series.pct_change().dropna()
+        common_idx = strategy_returns.index.intersection(benchmark_returns.index)
+        if len(common_idx) < 2:
+            return {"observed_sharpe": 0.0, "p_value": 1.0, "null_sharpes": []}
+        returns = (strategy_returns.loc[common_idx].values
+                   - benchmark_returns.loc[common_idx].values)
+    else:
+        returns = strategy_returns.values
 
     observed = _sharpe_from_returns(returns)
 
+    # Sign-flip test: under H0 (no edge / no alpha), returns are
+    # symmetric around zero. Randomly flip signs to generate null.
     rng = np.random.default_rng(seed)
     null_sharpes = []
     for _ in range(n_permutations):
-        shuffled = rng.permutation(returns)
-        null_sharpes.append(_sharpe_from_returns(shuffled))
+        signs = rng.choice([-1, 1], size=len(returns))
+        null_sharpes.append(_sharpe_from_returns(returns * signs))
 
     null_sharpes = np.array(null_sharpes)
-    p_value = (null_sharpes >= observed).mean()
+    p_value = float((null_sharpes >= observed).mean())
 
     return {
         "observed_sharpe": observed,
-        "p_value": float(p_value),
+        "p_value": p_value,
         "null_sharpes": null_sharpes.tolist(),
     }
 
