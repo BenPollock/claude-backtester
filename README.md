@@ -933,6 +933,7 @@ backtester run \
 | `--report-tca` | Print transaction cost analysis (flag) | `false` |
 | `--trials` | Number of trials for Deflated Sharpe Ratio | disabled |
 | `--permutation-test` | Number of permutations for significance test | disabled |
+| `--no-plot` | Skip interactive chart display (equity curve and heatmap) | `false` |
 | `--monte-carlo-runs` | Number of Monte Carlo simulations | `1000` |
 
 ### `backtester optimize`

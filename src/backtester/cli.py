@@ -133,6 +133,7 @@ def cli(verbose: bool) -> None:
 @click.option("--report-risk", is_flag=True, default=False, help="Print VaR/CVaR risk metrics")
 @click.option("--report-mae-mfe", is_flag=True, default=False, help="Print per-trade MAE/MFE analysis")
 @click.option("--report-tca", is_flag=True, default=False, help="Print transaction cost analysis")
+@click.option("--no-plot", is_flag=True, default=False, help="Skip interactive chart display (equity curve and heatmap)")
 @click.option("--trials", default=None, type=int, help="Number of trials for Deflated Sharpe Ratio")
 @click.option("--permutation-test", default=None, type=int, help="Number of permutations for significance test")
 def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_positions,
@@ -147,7 +148,7 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
         fill_price, drip, kelly_fraction, max_sector_exposure, sector_map,
         max_gross_exposure, max_net_exposure, target_portfolio_vol,
         portfolio_vol_lookback, save_results, lot_method, rebalance_schedule,
-        config_file, report_risk, report_mae_mfe, report_tca, trials,
+        config_file, report_risk, report_mae_mfe, report_tca, no_plot, trials,
         permutation_test):
     """Run a backtest."""
     # Gap 49: Load TOML config file if provided
@@ -317,7 +318,8 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
         click.echo(f"Observed Sharpe: {result_perm['observed_sharpe']:.4f}")
         click.echo(f"P-value:         {result_perm['p_value']:.4f}")
 
-    plot_results(result)
+    if not no_plot:
+        plot_results(result)
 
 
 @cli.command("list-strategies")
