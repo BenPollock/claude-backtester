@@ -122,6 +122,102 @@ class TestBacktestEngine:
             assert result.benchmark_equity is not None
             assert len(result.benchmark_equity) > 0
 
+    def test_benchmark_equity_has_daily_data_points(self):
+        """Benchmark equity should have one data point per trading day
+        with benchmark data — not sparse/straight-line segments from
+        missing days."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = self._make_engine(tmpdir, days=252)
+            result = engine.run()
+
+            assert result.benchmark_equity is not None
+            equity_len = len(result.equity_series)
+            bm_len = len(result.benchmark_equity)
+
+            # Benchmark may have slightly fewer points than equity
+            # because synthetic data uses bdate_range which doesn't
+            # perfectly match NYSE holidays. But it should be very
+            # close — within 2% of the equity length.
+            ratio = bm_len / equity_len
+            assert ratio > 0.98, (
+                f"Benchmark equity has {bm_len} points but strategy equity "
+                f"has {equity_len} (ratio={ratio:.2%}) — benchmark appears "
+                f"to be missing significant data"
+            )
+
+    def test_benchmark_equity_tracks_price_movements(self):
+        """Benchmark equity should reflect actual price changes, not
+        be a straight line (which would indicate sparse data)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = self._make_engine(tmpdir, days=100)
+            result = engine.run()
+
+            assert result.benchmark_equity is not None
+            values = [v for _, v in result.benchmark_equity]
+
+            # With random daily returns, there should be meaningful
+            # day-to-day variation in benchmark equity
+            diffs = [abs(values[i] - values[i - 1]) for i in range(1, len(values))]
+            nonzero_diffs = sum(1 for d in diffs if d > 0.01)
+            assert nonzero_diffs > len(diffs) * 0.9, (
+                f"Only {nonzero_diffs}/{len(diffs)} days had price movement — "
+                f"benchmark equity appears to be sparse/missing data"
+            )
+
+    def test_benchmark_equity_starts_at_starting_cash(self):
+        """First benchmark equity value should equal starting_cash
+        (buying benchmark shares at first close price)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = self._make_engine(tmpdir, days=100)
+            result = engine.run()
+
+            assert result.benchmark_equity is not None
+            first_value = result.benchmark_equity[0][1]
+            # benchmark_shares = starting_cash / first_close, so
+            # first equity = benchmark_shares * first_close = starting_cash
+            # (approximately, due to integer share truncation not applying here)
+            assert abs(first_value - 100_000.0) < 1.0, (
+                f"First benchmark equity ({first_value:.2f}) should equal "
+                f"starting cash (100000.00)"
+            )
+
+    def test_benchmark_with_separate_ticker(self):
+        """Benchmark should work correctly when benchmark ticker differs
+        from the trading tickers."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = MockDataSource()
+            # Different price series for ticker and benchmark
+            source.add("TRADE", make_price_df(days=100, start_price=50.0))
+            source.add("BENCH", make_price_df(days=100, start_price=200.0))
+
+            config = BacktestConfig(
+                strategy_name="sma_crossover",
+                tickers=["TRADE"],
+                benchmark="BENCH",
+                start_date=date(2020, 1, 2),
+                end_date=date(2020, 5, 29),
+                starting_cash=100_000.0,
+                max_positions=10,
+                max_alloc_pct=0.20,
+                fee_per_trade=0.0,
+                slippage_bps=0.0,
+                data_cache_dir=tmpdir,
+                strategy_params={"sma_fast": 20, "sma_slow": 50},
+            )
+
+            data_mgr = DataManager(cache_dir=tmpdir, source=source)
+            engine = BacktestEngine(config, data_manager=data_mgr)
+            result = engine.run()
+
+            assert result.benchmark_equity is not None
+            bm_len = len(result.benchmark_equity)
+            eq_len = len(result.equity_series)
+            ratio = bm_len / eq_len
+            assert ratio > 0.98, (
+                f"Benchmark has {bm_len} points vs equity {eq_len} "
+                f"(ratio={ratio:.2%}) — benchmark appears sparse"
+            )
+
     def test_regime_filter_suppresses_buy_allows_sell(self):
         """When regime is off (fast <= slow), BUY signals should be suppressed
         but SELL signals should still execute."""

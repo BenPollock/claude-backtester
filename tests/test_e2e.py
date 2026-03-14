@@ -978,3 +978,147 @@ class TestPositionSizing:
                 f"Position value ({actual_value:.2f}) is less than 50% of target "
                 f"({expected_value:.2f}). Sizing may be off."
             )
+
+
+# ===========================================================================
+# 12. TestBenchmarkEquityDensity
+# ===========================================================================
+
+
+class TestBenchmarkEquityDensity:
+    """Verify that benchmark equity has a data point for every trading day.
+
+    Regression test for a bug where benchmark equity was tracked inside the
+    main loop via timestamp matching (``ts in benchmark_data.index``), which
+    could silently skip days if the engine's ``trading_days`` index didn't
+    exactly match the benchmark DataFrame's index. The fix computes benchmark
+    equity directly from ``benchmark_data["Close"]`` after the loop.
+    """
+
+    def test_benchmark_density_matches_equity_curve(self):
+        """Benchmark equity should be very close to the equity curve length
+        — one per trading day with benchmark data."""
+        source, config = _basic_source_and_config(days=252)
+        result = _run_backtest(config, source)
+
+        eq_len = len(result.equity_series)
+        bm = result.benchmark_series
+        assert bm is not None
+        bm_len = len(bm)
+        # Synthetic data uses bdate_range, which may differ slightly
+        # from the NYSE calendar. But the ratio should be very close.
+        ratio = bm_len / eq_len
+        assert ratio > 0.98, (
+            f"Benchmark has {bm_len} points but equity has {eq_len} "
+            f"(ratio={ratio:.2%}). Benchmark appears sparse."
+        )
+
+    def test_benchmark_no_straight_line_segments(self):
+        """Benchmark values should change day-to-day (not be straight-line
+        segments caused by missing intermediate data points)."""
+        source, config = _basic_source_and_config(days=252)
+        result = _run_backtest(config, source)
+
+        bm = result.benchmark_series
+        assert bm is not None
+        # Check that most consecutive days have different values
+        diffs = bm.diff().dropna()
+        nonzero = (diffs.abs() > 1e-6).sum()
+        assert nonzero > len(diffs) * 0.9, (
+            f"Only {nonzero}/{len(diffs)} benchmark days had price change. "
+            f"Benchmark appears sparse (straight-line segments)."
+        )
+
+    def test_benchmark_starts_at_starting_cash(self):
+        """The first benchmark equity value should equal starting_cash."""
+        source, config = _basic_source_and_config(
+            starting_cash=50_000.0, days=100,
+        )
+        result = _run_backtest(config, source)
+
+        bm = result.benchmark_series
+        assert bm is not None
+        assert abs(bm.iloc[0] - 50_000.0) < 1.0, (
+            f"First benchmark equity ({bm.iloc[0]:.2f}) should approximate "
+            f"starting cash (50000.00)"
+        )
+
+    def test_benchmark_final_value_reflects_price_change(self):
+        """Benchmark final value should track the underlying close prices,
+        not be constant or disconnected from actual price movements."""
+        source, config = _basic_source_and_config(
+            days=100, start_price=100.0,
+        )
+        result = _run_backtest(config, source)
+
+        bm = result.benchmark_series
+        assert bm is not None
+        # The benchmark should not be flat — it must track price changes
+        assert bm.iloc[-1] != bm.iloc[0], (
+            "Benchmark value should change over time, not stay constant"
+        )
+
+    def test_benchmark_with_separate_benchmark_ticker(self):
+        """When benchmark ticker differs from trading tickers, benchmark
+        equity should still have full daily coverage."""
+        source = MockDataSource()
+        source.add("ALPHA", make_price_df(days=200, start_price=50.0))
+        source.add("BETA", make_price_df(days=200, start_price=150.0))
+
+        sample = source._data["ALPHA"]
+        start_date, end_date = _dates_from_df(sample)
+
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["ALPHA"],
+            benchmark="BETA",
+            start_date=start_date,
+            end_date=end_date,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.10,
+            strategy_params={"sma_fast": 20, "sma_slow": 50},
+        )
+        result = _run_backtest(config, source)
+
+        eq_len = len(result.equity_series)
+        bm = result.benchmark_series
+        assert bm is not None
+        bm_len = len(bm)
+        ratio = bm_len / eq_len
+        assert ratio > 0.98, (
+            f"Separate-ticker benchmark has {bm_len} points vs equity {eq_len} "
+            f"(ratio={ratio:.2%})"
+        )
+
+    def test_benchmark_with_multi_ticker_backtest(self):
+        """When running with multiple tickers and one of them as benchmark,
+        benchmark equity should still be fully populated."""
+        source = MockDataSource()
+        for sym in ["SPY", "QQQ"]:
+            source.add(sym, make_price_df(days=200, start_price=100.0))
+
+        sample = source._data["SPY"]
+        start_date, end_date = _dates_from_df(sample)
+
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["SPY", "QQQ"],
+            benchmark="SPY",
+            start_date=start_date,
+            end_date=end_date,
+            starting_cash=100_000.0,
+            max_positions=2,
+            max_alloc_pct=0.50,
+            strategy_params={"sma_fast": 20, "sma_slow": 50},
+        )
+        result = _run_backtest(config, source)
+
+        eq_len = len(result.equity_series)
+        bm = result.benchmark_series
+        assert bm is not None
+        ratio = len(bm) / eq_len
+        assert ratio > 0.98, (
+            f"Multi-ticker benchmark has {len(bm)} points vs equity {eq_len} "
+            f"(ratio={ratio:.2%})"
+        )

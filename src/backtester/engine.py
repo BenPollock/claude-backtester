@@ -220,10 +220,6 @@ class BacktestEngine:
         # 6. Initialize portfolio
         portfolio = Portfolio(cash=config.starting_cash)
 
-        # 7. Track benchmark equity for comparison
-        benchmark_equity: list[tuple[date, float]] = []
-        benchmark_shares = 0
-
         # Gap 20: vol targeting state
         prev_day_date = None
 
@@ -304,15 +300,6 @@ class BacktestEngine:
                         self._force_close_all(portfolio, day)
                         self._halted = True
                         logger.info(f"Drawdown kill switch triggered at {dd:.2%} on {day}")
-
-            # d. Track benchmark equity
-            if benchmark_data is not None and ts in benchmark_data.index:
-                bm_row = benchmark_data.loc[ts]
-                bm_close = bm_row.get("Close")
-                if not pd.isna(bm_close):
-                    if benchmark_shares == 0 and bm_close > 0:
-                        benchmark_shares = config.starting_cash / bm_close
-                    benchmark_equity.append((day, benchmark_shares * bm_close))
 
             # Skip signal generation if halted
             if self._halted:
@@ -416,15 +403,26 @@ class BacktestEngine:
 
         logger.info(f"Backtest complete. {len(portfolio.trade_log)} trades executed.")
 
-        # Extract benchmark close prices for analytics
+        # Compute benchmark buy-and-hold equity from benchmark close prices.
+        # Built directly from benchmark_data rather than tracking inside the
+        # main loop, which avoids timestamp-matching issues between the
+        # engine's trading_days index and the benchmark DataFrame's index.
+        benchmark_equity: list[tuple[date, float]] | None = None
         benchmark_prices = None
         if benchmark_data is not None and "Close" in benchmark_data.columns:
             benchmark_prices = benchmark_data["Close"]
+            bm_closes = benchmark_data["Close"].dropna()
+            if len(bm_closes) > 0 and bm_closes.iloc[0] > 0:
+                bm_shares = config.starting_cash / bm_closes.iloc[0]
+                benchmark_equity = []
+                for bm_ts, bm_price in bm_closes.items():
+                    bm_day = bm_ts.date() if hasattr(bm_ts, 'date') else bm_ts
+                    benchmark_equity.append((bm_day, bm_shares * bm_price))
 
         result = BacktestResult(
             config=config,
             portfolio=portfolio,
-            benchmark_equity=benchmark_equity if benchmark_equity else None,
+            benchmark_equity=benchmark_equity,
             benchmark_prices=benchmark_prices,
             universe_data=universe_data,
         )
