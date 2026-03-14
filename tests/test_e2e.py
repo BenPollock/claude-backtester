@@ -1122,3 +1122,67 @@ class TestBenchmarkEquityDensity:
             f"Multi-ticker benchmark has {len(bm)} points vs equity {eq_len} "
             f"(ratio={ratio:.2%})"
         )
+
+    def test_benchmark_survives_stale_cache_timestamps(self):
+        """Regression: cached data with non-midnight timestamps (from older
+        yfinance/pandas versions) should not produce sparse benchmark equity.
+
+        This was the root cause of the 'straight-line benchmark' bug where
+        the SPY Buy & Hold chart showed only a few data points over years.
+        """
+        from backtester.data.cache import ParquetCache
+
+        dates = pd.bdate_range("2020-01-02", periods=200, freq="B")
+
+        # Simulate stale cache: data stored with 5am UTC timestamps
+        stale_timestamps = [d + pd.Timedelta(hours=5) for d in dates]
+        stale_df = pd.DataFrame(
+            {
+                "Open": np.linspace(99, 120, 200),
+                "High": np.linspace(101, 122, 200),
+                "Low": np.linspace(97, 118, 200),
+                "Close": np.linspace(100, 121, 200),
+                "Volume": np.full(200, 1_000_000),
+            },
+            index=pd.DatetimeIndex(stale_timestamps, name="Date"),
+        )
+
+        tmpdir = tempfile.mkdtemp()
+
+        # Pre-populate cache with stale timestamps
+        cache = ParquetCache(tmpdir)
+        cache.save("TEST", stale_df)
+
+        # Create a MockDataSource that would NOT be called (cache hit)
+        source = MockDataSource()
+        # Add data just in case cache miss, but we expect cache hit
+        source.add("TEST", stale_df)
+
+        start_date = dates[0].date()
+        end_date = dates[-1].date()
+
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_date,
+            end_date=end_date,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.10,
+            strategy_params={"sma_fast": 20, "sma_slow": 50},
+        )
+
+        dm = DataManager(cache_dir=tmpdir, source=source)
+        engine = BacktestEngine(config, data_manager=dm)
+        result = engine.run()
+
+        eq_len = len(result.equity_series)
+        bm = result.benchmark_series
+        assert bm is not None, "Benchmark should not be None"
+        ratio = len(bm) / eq_len
+        assert ratio > 0.90, (
+            f"Benchmark has {len(bm)} points vs equity {eq_len} "
+            f"(ratio={ratio:.2%}). Stale cache timestamps caused "
+            f"sparse benchmark data."
+        )

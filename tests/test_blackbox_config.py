@@ -5,7 +5,7 @@ These tests exercise the backtester via its Python API with pathological
 config values to check for crashes, NaN/inf metrics, negative equity,
 and nonsensical results.
 
-Bugs found:
+Bugs found (historical):
   - Future start date (2099): DataManager forward-fills 252 real rows across
     ~19k business days, producing a huge equity curve of stale data instead of
     raising an error or returning empty.
@@ -13,6 +13,7 @@ Bugs found:
     drawdown calculation when peak equity is always zero).
 """
 
+import tempfile
 from datetime import date
 
 import numpy as np
@@ -115,7 +116,8 @@ def _make_config(tickers=None, benchmark="TEST", starting_cash=10000,
 
 
 def _run(config, source):
-    dm = DataManager(source=source)
+    tmpdir = tempfile.mkdtemp()
+    dm = DataManager(cache_dir=tmpdir, source=source)
     engine = BacktestEngine(config, dm)
     return engine.run()
 

@@ -4,6 +4,7 @@ We register custom Strategy subclasses, run full backtests via the engine,
 and inspect outputs -- without reading any source code.
 """
 
+import tempfile
 from datetime import date
 
 import numpy as np
@@ -98,7 +99,8 @@ def _make_config(tickers, benchmark="SPY", cash=100_000, max_positions=100,
 
 
 def _run(config, source):
-    dm = DataManager(source=source)
+    tmpdir = tempfile.mkdtemp()
+    dm = DataManager(cache_dir=tmpdir, source=source)
     engine = BacktestEngine(config, dm)
     return engine.run()
 

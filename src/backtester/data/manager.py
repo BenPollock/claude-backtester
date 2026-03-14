@@ -127,6 +127,14 @@ class DataManager:
         """Trim to date range, reindex to trading days, and forward-fill gaps."""
         trading_days = self._calendar.trading_days(start, end)
 
+        # Normalize index to timezone-naive midnight timestamps before
+        # reindexing, so data from any source (cache, Yahoo, CSV) matches
+        # the trading calendar format consistently.
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        df.index = pd.DatetimeIndex(df.index.date, name="Date")
+        df = df[~df.index.duplicated(keep="last")]
+
         # Reindex to trading calendar
         df = df.reindex(trading_days)
 

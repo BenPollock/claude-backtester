@@ -75,7 +75,8 @@ def _make_config(tickers, benchmark="SPY", start="2020-01-01", end="2020-12-31",
 
 def _run_backtest(config, source):
     """Run backtest with mock data source and return result."""
-    dm = DataManager(source=source)
+    tmpdir = tempfile.mkdtemp()
+    dm = DataManager(cache_dir=tmpdir, source=source)
     engine = BacktestEngine(config, data_manager=dm)
     return engine.run()
 

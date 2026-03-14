@@ -29,6 +29,14 @@ class ParquetCache:
         try:
             df = pd.read_parquet(path)
             df.index = pd.DatetimeIndex(df.index, name="Date")
+            # Normalize to timezone-naive midnight timestamps so cached
+            # data always matches the trading calendar's index format,
+            # regardless of how it was originally stored (different
+            # yfinance versions, pandas versions, or timezone variants).
+            if hasattr(df.index, 'tz') and df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            df.index = pd.DatetimeIndex(df.index.date, name="Date")
+            df = df[~df.index.duplicated(keep="last")]
             return df
         except Exception as e:
             logger.warning(f"Failed to read cache for {symbol}: {e}")
