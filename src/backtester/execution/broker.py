@@ -180,11 +180,16 @@ class SimulatedBroker:
                 if pos is None or pos.total_quantity == 0:
                     order.status = OrderStatus.CANCELLED
                     continue
-                # For short positions being covered, resolve to abs of held qty
                 if pos.is_short:
-                    quantity = abs(pos.total_quantity)
-                else:
-                    quantity = pos.total_quantity
+                    # SELL sentinel on a short position is invalid — closing
+                    # a short requires a COVER (BUY) order, not a SELL.
+                    order.status = OrderStatus.CANCELLED
+                    logger.warning(
+                        f"SELL sentinel (-1) for {order.symbol} on short position — "
+                        f"cancelled (use COVER to close shorts)"
+                    )
+                    continue
+                quantity = pos.total_quantity
 
             # For BUY orders that are covers (quantity < 0 sentinel), resolve
             if order.side == Side.BUY and quantity < 0:
@@ -313,7 +318,17 @@ class SimulatedBroker:
             elif order.side == Side.SELL:
                 # Normal long sell
                 pos = portfolio.get_position(order.symbol)
-                if pos is not None:
+                if pos is None or pos.is_short:
+                    # No position to sell, or position is short (should use COVER
+                    # instead of SELL to close a short). Cancel to prevent phantom
+                    # fills or a crash in sell_lots_fifo.
+                    order.status = OrderStatus.CANCELLED
+                    logger.debug(
+                        f"Cancelled SELL for {order.symbol}: "
+                        f"{'no position' if pos is None else 'position is short'}"
+                    )
+                    continue
+                else:
                     avg_cost = pos.avg_entry_price
                     trades = pos.sell_lots_fifo(quantity, fill_price, current_date, commission)
                     portfolio.trade_log.extend(trades)

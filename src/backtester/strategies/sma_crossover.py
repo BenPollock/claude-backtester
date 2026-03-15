@@ -20,6 +20,7 @@ class SmaCrossover(Strategy):
     """
 
     def __init__(self):
+        super().__init__()
         self.sma_fast = 50
         self.sma_slow = 200
 

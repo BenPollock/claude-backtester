@@ -78,6 +78,14 @@ class BacktestConfig:
     # --- Gap 9: Fundamental data sidecar ---
     fundamental_data_path: str | None = None
 
+    # --- EDGAR data integration ---
+    use_edgar: bool = False                    # Master switch for EDGAR data
+    edgar_user_agent: str = "claude-backtester research@example.com"
+    edgar_financials: bool = True              # 10-K/10-Q financial statements
+    edgar_insider: bool = True                 # Form 4 insider trading
+    edgar_institutional: bool = False          # 13F holdings (slower, optional)
+    edgar_events: bool = True                  # 8-K material events
+
     # --- Gap 14: Fill price model ---
     fill_price_model: str = "open"  # "open", "close", "vwap", "random"
 

@@ -27,6 +27,9 @@ dev = [
 optimize = [
     "scikit-optimize>=0.9",
 ]
+edgar = [
+    "edgartools>=2.0",
+]
 
 [project.scripts]
 backtester = "backtester.cli:cli"

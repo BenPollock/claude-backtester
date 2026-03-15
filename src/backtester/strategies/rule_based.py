@@ -127,6 +127,7 @@ class RuleBasedStrategy(Strategy):
     """
 
     def __init__(self):
+        super().__init__()
         self._indicator_specs: dict = {}
         self._benchmark_specs: dict = {}
         self._buy_rules: list = []

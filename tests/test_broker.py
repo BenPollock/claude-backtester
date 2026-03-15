@@ -440,14 +440,10 @@ class TestBrokerEdgeCases:
         market_data = {"AAPL": make_row(open_price=100.0)}
         fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
 
-        # The broker should not have any position to sell from, so:
-        # If the order filled, check that portfolio wasn't corrupted
-        # If cancelled, that's expected behavior
-        if len(fills) == 0:
-            assert order.status == OrderStatus.CANCELLED
-        else:
-            # Even if the broker allows it, no position should be negative
-            assert not portfolio.has_position("AAPL") or portfolio.positions["AAPL"].total_quantity >= 0
+        assert len(fills) == 0, "SELL with no position should produce no fills"
+        assert order.status == OrderStatus.CANCELLED
+        assert not portfolio.has_position("AAPL")
+        assert portfolio.cash == 100_000.0, "Cash should be unchanged"
 
     def test_partial_fill_with_volume_constraint(self):
         """max_volume_pct should limit the fill quantity.
@@ -472,3 +468,57 @@ class TestBrokerEdgeCases:
         # volume=1000 * 0.10 = 100 max fillable
         assert fills[0].quantity == 100
         assert portfolio.positions["AAPL"].total_quantity == 100
+
+    def test_sell_sentinel_on_short_position_cancelled(self):
+        """SELL with qty=-1 on a short position should be cancelled (not crash).
+
+        Closing a short requires a COVER (BUY) order. A SELL sentinel on a
+        short position is semantically wrong and would previously crash in
+        sell_lots_fifo which requires a long position.
+        """
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        # Create a short position
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-100, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=-1,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=140.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 0, "SELL sentinel on short position should produce no fills"
+        assert order.status == OrderStatus.CANCELLED
+        # Position should be unchanged
+        assert portfolio.positions["AAPL"].total_quantity == -100
+        assert portfolio.cash == 100_000.0
+
+    def test_sell_positive_qty_on_short_position_cancelled(self):
+        """SELL with positive qty on a short position should be cancelled.
+
+        sell_lots_fifo is only valid for long positions. A SELL on a short
+        position would previously crash with ValueError.
+        """
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-100, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=50,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=140.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 0, "SELL on short position should produce no fills"
+        assert order.status == OrderStatus.CANCELLED
+        assert portfolio.positions["AAPL"].total_quantity == -100

@@ -159,11 +159,22 @@ class BacktestEngine:
         strategy = get_strategy(config.strategy_name)
         strategy.configure(config.strategy_params)
 
-        # Gap 9: Inject fundamental data manager if configured
-        if config.fundamental_data_path:
-            from backtester.data.fundamental import FundamentalDataManager
-            fm = FundamentalDataManager(config.fundamental_data_path)
-            strategy.set_fundamental_data(fm)
+        # Load and merge EDGAR data
+        edgar_mgr = None
+        if config.use_edgar:
+            from backtester.data.fundamental import EdgarDataManager
+            edgar_mgr = EdgarDataManager(
+                cache_dir=config.data_cache_dir,
+                use_edgar=True,
+                edgar_user_agent=config.edgar_user_agent,
+                enable_financials=config.edgar_financials,
+                enable_insider=config.edgar_insider,
+                enable_institutional=config.edgar_institutional,
+                enable_events=config.edgar_events,
+            )
+        elif config.fundamental_data_path:
+            from backtester.data.fundamental import EdgarDataManager
+            edgar_mgr = EdgarDataManager(csv_path=config.fundamental_data_path)
 
         # 2. Load universe data — include historical universe symbols
         tickers = list(config.tickers)
@@ -179,6 +190,13 @@ class BacktestEngine:
 
         if not universe_data:
             raise RuntimeError("No data loaded for any ticker")
+
+        if edgar_mgr:
+            strategy.set_fundamental_data(edgar_mgr)
+            for symbol in list(universe_data.keys()):
+                universe_data[symbol] = edgar_mgr.merge_all_onto_daily(
+                    symbol, universe_data[symbol]
+                )
 
         # 3. Resample data for multi-timeframe strategies and compute indicators
         extra_timeframes = [tf for tf in strategy.timeframes if tf != "daily"]

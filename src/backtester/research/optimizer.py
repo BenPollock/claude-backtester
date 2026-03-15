@@ -221,7 +221,10 @@ def print_optimization_results(opt: OptimizationResult, top_n: int = 20) -> None
 
     # Sort by metric
     if metric in df.columns:
-        show = df[df.get("error", pd.Series(dtype=str)).isna()].copy()
+        if "error" in df.columns:
+            show = df[df["error"].isna()].copy()
+        else:
+            show = df.copy()
         show = show.sort_values(metric, ascending=False).head(top_n)
     else:
         show = df.head(top_n)

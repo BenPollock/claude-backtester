@@ -24,7 +24,11 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100.0 - (100.0 / (1.0 + rs))
+    rsi_val = 100.0 - (100.0 / (1.0 + rs))
+    # When avg_loss=0 and avg_gain>0 (all gains), RSI should be 100
+    all_gain = (avg_loss == 0) & avg_loss.notna() & (avg_gain > 0)
+    rsi_val = rsi_val.where(~all_gain, 100.0)
+    return rsi_val
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:

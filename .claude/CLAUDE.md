@@ -7,17 +7,18 @@
 | CLI / Config / Types | `src/backtester/cli.py`, `config.py`, `types.py` | Click CLI, frozen config dataclasses, Side/SignalAction/OrderType/SHORT/COVER enums |
 | Engine | `src/backtester/engine.py` | Central orchestrator: data load, day loop, regime filter, stop triggers, short selling, limit orders, multi-timeframe |
 | Data | `src/backtester/data/` | Cache-first OHLCV loading (Parquet), NYSE calendar, Yahoo fetcher, universe scraper, `resample_ohlcv()` for multi-timeframe |
-| Strategies | `src/backtester/strategies/` | Strategy ABC + registry, SMA crossover, rule-based DSL, 18 indicator functions, `Signal` dataclass for limit orders, `timeframes` property |
+| EDGAR Data | `src/backtester/data/edgar_*.py`, `fundamental.py`, `fundamental_cache.py` | SEC EDGAR integration: financial statements (10-K/10-Q), insider trading (Form 4), institutional holdings (13F), material events (8-K). EdgarDataManager merges all onto daily DataFrames with `fund_`/`insider_`/`inst_`/`event_` prefixed columns |
+| Strategies | `src/backtester/strategies/` | Strategy ABC + registry, SMA crossover, rule-based DSL, value_quality, earnings_growth, fundamental_screener, insider_following, smart_money, 18 indicator functions, `Signal` dataclass for limit orders, `timeframes` property |
 | Execution | `src/backtester/execution/` | SimulatedBroker (next-day fills, limit orders, short fills), slippage/fee models, position sizers |
 | Portfolio | `src/backtester/portfolio/` | Mutable Portfolio state, FIFO Position/Lot tracking (long + short), Order/Fill/Trade models, margin tracking |
 | Analytics | `src/backtester/analytics/` | CAGR/Sharpe/drawdown metrics, report output, Monte Carlo, calendar analytics, tearsheet, correlation/concentration, signal decay, regime analysis |
 | Research | `src/backtester/research/` | Grid search parameter optimization, walk-forward IS/OOS analysis, multi-strategy portfolio |
-| Tests | `tests/` | ~492 tests, 23 files, all synthetic data, no network calls |
+| Tests | `tests/` | ~1116 tests, 27+ files, all synthetic data, no network calls |
 
 ## Key Data Flows
 
 **Main Backtest Pipeline:**
-CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `DataManager.load_many()` (cache-first) --> `strategy.compute_indicators()` (vectorized, once per ticker) --> day-by-day loop --> `BacktestResult` --> `print_report()`
+CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `DataManager.load_many()` (cache-first) --> `EdgarDataManager.merge_all_onto_daily()` (if EDGAR enabled, adds `fund_`/`insider_`/`inst_`/`event_` columns) --> `strategy.compute_indicators()` (vectorized, once per ticker) --> day-by-day loop --> `BacktestResult` --> `print_report()`
 
 **Day Loop (strict order -- do not reorder):**
 1. `broker.process_fills()` -- fill yesterday's orders at today's Open
@@ -43,7 +44,7 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 
 | Interface | Location | Implementations |
 |-----------|----------|-----------------|
-| `Strategy` ABC | `strategies/base.py` | `SmaCrossover`, `RuleBasedStrategy` |
+| `Strategy` ABC | `strategies/base.py` | `SmaCrossover`, `RuleBasedStrategy`, `ValueQuality`, `EarningsGrowth`, `FundamentalScreener`, `InsiderFollowing`, `SmartMoney` |
 | `@register_strategy` | `strategies/registry.py` | Decorator populates `_REGISTRY` dict; lookup via `get_strategy(name)` |
 | `DataSource` ABC | `data/manager.py` | `YahooDataSource` |
 | `SlippageModel` ABC | `execution/slippage.py` | `FixedSlippage`, `VolumeSlippage` |
@@ -69,6 +70,11 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 - **Short Selling Guarded:** `allow_short=False` by default in BacktestConfig. SHORT signals rejected when disabled. Borrow costs tracked on Position but not auto-deducted from cash.
 - **Multi-Timeframe Forward-Fill:** Resampled weekly/monthly data is forward-filled onto the daily index to prevent lookahead. Strategies access via prefixed columns (e.g., `weekly_Close`).
 - **Multi-Strategy Isolation:** Each strategy allocation runs independently with its own proportional cash. No cross-strategy interaction. Combined equity = sum of individual curves.
+- **EDGAR Point-in-Time:** All EDGAR data keyed on `filed_date`, not `period_end`. Financial data only visible after SEC filing. Insider trades visible after Form 4 filing (within 2 days of transaction).
+- **EDGAR Column Prefixes:** `fund_` (10-K/10-Q financials), `insider_` (Form 4), `inst_` (13F holdings), `event_` (8-K events). Mirrors existing `weekly_`/`monthly_` pattern.
+- **EDGAR Graceful Degradation:** All EDGAR strategies check for required columns and return HOLD if absent. Safe to run without `--use-edgar`.
+- **EDGAR Cache Isolation:** Cached under `{cache_dir}/edgar/{type}/{SYMBOL}.parquet`. Separate from OHLCV cache.
+- **edgartools Optional:** `pip install -e ".[edgar]"` to enable. All edgartools imports guarded with try/except ImportError.
 
 ## Patterns
 
@@ -82,8 +88,8 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 ## Test Approach
 
 ```bash
-pytest tests/ -v                                          # full suite (773 tests)
-pytest tests/test_e2e.py -v                               # E2E integration tests (28 tests)
+pytest tests/ -v                                          # full suite (1116 tests)
+pytest tests/test_e2e.py tests/test_edgar_e2e.py -v       # E2E integration tests (46 tests)
 pytest tests/test_portfolio.py::TestPosition::test_sell_fifo -v  # single unit test
 ```
 
@@ -99,4 +105,4 @@ pytest tests/test_portfolio.py::TestPosition::test_sell_fifo -v  # single unit t
 
 **Coverage gaps:** Multi-timeframe strategies lack end-to-end integration tests with real indicator logic. Tearsheet visual correctness is not tested (only structural HTML checks).
 
-**Test counts by area:** E2E integration (28), strategies (50), short selling (47), metrics (42), limit orders (39), fees extended (34), correlation (26), tearsheet (21), regime (21), multi-strategy (19), signal decay (17), position sizing (17), multi-timeframe (16), portfolio (15), calendar analytics (18), CLI (22), report (12), optimizer (12), stops (11), engine (9), broker (8), activity log (7), universe (7), data (6), slippage (4), Monte Carlo (4), calendar (3).
+**Test counts by area:** E2E integration (28), EDGAR E2E (18), fundamental/financial (53), insider (16), institutional (12), strategies (50), short selling (47), metrics (42), limit orders (39), fees extended (34), correlation (26), tearsheet (21), regime (21), multi-strategy (19), signal decay (17), position sizing (17), multi-timeframe (16), portfolio (15), calendar analytics (18), CLI (22), report (12), optimizer (12), stops (11), engine (9), broker (8), activity log (7), universe (7), data (6), slippage (4), Monte Carlo (4), calendar (3).

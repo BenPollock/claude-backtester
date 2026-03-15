@@ -18,7 +18,7 @@ def monthly_returns(equity_series: pd.Series) -> pd.DataFrame:
     )
     monthly.index.names = ["Year", "Month"]
     table = monthly.unstack(level="Month")
-    table.columns = list(range(1, len(table.columns) + 1))
+    table.columns = [int(c) for c in table.columns]
     # Add YTD column
     table["YTD"] = table.apply(lambda row: (1 + row.dropna()).prod() - 1, axis=1)
     return table

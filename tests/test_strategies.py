@@ -49,13 +49,15 @@ class TestIndicators:
         assert last_valid == pytest.approx(50.0, abs=10.0)
 
     def test_rsi_all_gains(self):
-        """Monotonically increasing prices: avg_loss=0 => RSI is NaN (division by zero).
-        This is expected behavior: the implementation replaces 0 avg_loss with NaN."""
+        """Monotonically increasing prices: avg_loss=0 => RSI should be 100."""
         prices = pd.Series([100.0 + i * 1.0 for i in range(30)])
         result = rsi(prices, 14)
-        # When all changes are positive, avg_loss is 0, replaced with NaN,
-        # making RS=NaN and RSI=NaN. This is the correct behavior.
-        assert result.isna().all()
+        # First 13 values are NaN (min_periods=14 warmup), rest should be 100
+        assert result.iloc[:13].isna().all()
+        valid = result.dropna()
+        assert len(valid) > 0
+        for v in valid:
+            assert v == pytest.approx(100.0)
 
     def test_rsi_mostly_gains(self):
         """Mostly gains with one tiny loss should give RSI near 100."""
