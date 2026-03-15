@@ -47,3 +47,73 @@ class TestMonteCarlo:
         assert result["p50"].shape == (49,)
         # final_values should have one entry per simulation
         assert result["final_values"].shape == (100,)
+
+
+class TestMonteCarloPercentileOrdering:
+    """Percentile values should be monotonically ordered: p5 < p25 < p50 < p75 < p95."""
+
+    def test_percentile_ordering_at_each_timestep(self):
+        equity = make_equity(np.linspace(100, 150, 100))
+        paths = run_monte_carlo(equity, n_simulations=5000, seed=42)
+        result = monte_carlo_percentiles(paths)
+
+        # At every timestep, lower percentiles should be <= higher percentiles
+        for i in range(len(result["p5"])):
+            assert result["p5"][i] <= result["p25"][i], f"p5 > p25 at step {i}"
+            assert result["p25"][i] <= result["p50"][i], f"p25 > p50 at step {i}"
+            assert result["p50"][i] <= result["p75"][i], f"p50 > p75 at step {i}"
+            assert result["p75"][i] <= result["p95"][i], f"p75 > p95 at step {i}"
+
+
+
+class TestMonteCarloEdgeCases:
+    """Edge cases for Monte Carlo simulation."""
+
+    def test_two_value_equity_series(self):
+        """Minimum viable equity series: 2 values produce 1 return."""
+        equity = make_equity([100, 110])
+        paths = run_monte_carlo(equity, n_simulations=50, seed=42)
+        # 1 return → paths shape is (n_simulations, 1)
+        assert paths.shape == (50, 1)
+        # All paths should use the single return (10%), so all values = 100 * 1.10 = 110
+        np.testing.assert_allclose(paths[:, 0], 110.0)
+
+    def test_constant_equity_series(self):
+        """Flat equity (zero returns) should produce flat paths."""
+        equity = make_equity([100, 100, 100, 100, 100])
+        paths = run_monte_carlo(equity, n_simulations=20, seed=42)
+        # All returns are 0%, so all paths should stay at 100
+        np.testing.assert_allclose(paths, 100.0)
+
+    def test_large_n_simulations_mean_close_to_original(self):
+        """With many simulations, the mean final value should approximate
+        the original final value (bootstrap preserves return distribution)."""
+        equity = make_equity(np.linspace(100, 120, 50))
+        paths = run_monte_carlo(equity, n_simulations=10000, seed=42)
+        result = monte_carlo_percentiles(paths)
+
+        original_final = equity.iloc[-1]
+        sim_mean_final = result["final_values"].mean()
+        # The mean should be within 5% of the original final value
+        assert abs(sim_mean_final - original_final) / original_final < 0.05, (
+            f"Mean final {sim_mean_final:.2f} too far from original {original_final:.2f}"
+        )
+
+    def test_all_paths_positive(self):
+        """Equity paths from bootstrap should remain positive (cumulative product
+        of (1+r) factors where r > -1)."""
+        equity = make_equity(np.linspace(100, 80, 50))  # declining equity
+        paths = run_monte_carlo(equity, n_simulations=500, seed=42)
+        assert np.all(paths > 0), "All simulated equity values should be positive"
+
+    def test_custom_percentiles(self):
+        """monte_carlo_percentiles accepts custom percentile list."""
+        equity = make_equity(np.linspace(100, 120, 30))
+        paths = run_monte_carlo(equity, n_simulations=100, seed=42)
+        result = monte_carlo_percentiles(paths, percentiles=[10, 50, 90])
+
+        assert "p10" in result
+        assert "p50" in result
+        assert "p90" in result
+        assert "p5" not in result  # not requested
+        assert "final_values" in result  # always included

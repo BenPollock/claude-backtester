@@ -51,7 +51,7 @@ class TradingCalendar:
 
         combined = parts[0]
         for p in parts[1:]:
-            combined = combined.append(p)
+            combined = combined.union(p)
 
         return combined.unique().sort_values()
 

@@ -38,6 +38,8 @@ class FixedFractional(PositionSizer):
         if price <= 0:
             return 0
         target = min(equity * max_alloc_pct, cash)
+        if target <= 0:
+            return 0
         return int(target // price)
 
 
@@ -62,13 +64,18 @@ class ATRSizer(PositionSizer):
         if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
             # Fallback to fixed fractional if ATR not available
             target = min(equity * max_alloc_pct, cash)
+            if target <= 0:
+                return 0
             return int(target // price)
         risk_per_share = atr_val * self._atr_multiple
         if risk_per_share <= 0:
             return 0
         shares = int((equity * self._risk_pct) / risk_per_share)
         # Cap by max allocation and available cash
-        max_shares = int(min(equity * max_alloc_pct, cash) // price)
+        max_target = min(equity * max_alloc_pct, cash)
+        if max_target <= 0:
+            return 0
+        max_shares = int(max_target // price)
         return min(shares, max_shares)
 
 
@@ -92,6 +99,8 @@ class KellyCriterionSizer(PositionSizer):
         if (win_rate is None or payoff is None
                 or pd.isna(win_rate) or pd.isna(payoff) or payoff <= 0):
             target = min(equity * max_alloc_pct, cash)
+            if target <= 0:
+                return 0
             return int(target // price)
         f_star = (win_rate * payoff - (1 - win_rate)) / payoff
         if f_star <= 0:
@@ -99,6 +108,8 @@ class KellyCriterionSizer(PositionSizer):
         alloc = f_star * self._fraction
         alloc = min(alloc, max_alloc_pct)
         target = min(equity * alloc, cash)
+        if target <= 0:
+            return 0
         return int(target // price)
 
 
@@ -119,6 +130,8 @@ class RiskParitySizer(PositionSizer):
         atr_val = row.get("ATR")
         if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
             target = min(equity * max_alloc_pct, cash)
+            if target <= 0:
+                return 0
             return int(target // price)
         daily_vol = atr_val / price
         annual_vol = daily_vol * (252 ** 0.5)
@@ -126,6 +139,8 @@ class RiskParitySizer(PositionSizer):
             return 0
         target_value = equity * (self._target_vol / annual_vol)
         target_value = min(target_value, equity * max_alloc_pct, cash)
+        if target_value <= 0:
+            return 0
         return int(target_value // price)
 
 
@@ -141,6 +156,8 @@ class VolatilityParity(PositionSizer):
 
     def __init__(self, target_vol: float = 0.10, lookback: int = 20):
         self._target_vol = target_vol
+        # lookback is accepted for API compatibility (passed from config)
+        # but not currently used -- ATR serves as the vol proxy instead.
         self._lookback = lookback
 
     def compute(self, symbol, price, row, equity, cash, max_alloc_pct) -> int:
@@ -150,6 +167,8 @@ class VolatilityParity(PositionSizer):
         atr_val = row.get("ATR")
         if atr_val is None or pd.isna(atr_val) or atr_val <= 0 or price <= 0:
             target = min(equity * max_alloc_pct, cash)
+            if target <= 0:
+                return 0
             return int(target // price)
         daily_vol = atr_val / price
         annual_vol = daily_vol * (252 ** 0.5)
@@ -157,4 +176,6 @@ class VolatilityParity(PositionSizer):
             return 0
         target_value = equity * (self._target_vol / annual_vol)
         target_value = min(target_value, equity * max_alloc_pct, cash)
+        if target_value <= 0:
+            return 0
         return int(target_value // price)

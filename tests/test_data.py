@@ -190,3 +190,100 @@ class TestDataManager:
             results = mgr.load_many(["A", "B"], date(2020, 1, 2), date(2020, 12, 31))
             assert "A" in results
             assert "B" in results
+
+    def test_load_start_equals_end(self):
+        """Loading data where start == end on a trading day returns 1 row."""
+        source = MockDataSource()
+        df = make_price_df(start="2020-01-02", days=252)
+        source.add("TEST", df)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = DataManager(cache_dir=tmpdir, source=source)
+            # 2020-01-02 is a Thursday (trading day)
+            result = mgr.load("TEST", date(2020, 1, 2), date(2020, 1, 2))
+            assert len(result) == 1
+            assert "Close" in result.columns
+
+
+class TestParquetCacheSingleDay:
+    """Edge cases for cache with minimal data."""
+
+    def test_cache_single_day(self):
+        """Save and load a single day of data."""
+        single = make_price_df(start="2020-01-02", days=1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = ParquetCache(tmpdir)
+            cache.save("TEST", single)
+
+            assert cache.has("TEST")
+            loaded = cache.load("TEST")
+            assert loaded is not None
+            assert len(loaded) == 1
+            pd.testing.assert_frame_equal(loaded, single, check_index_type=False)
+
+    def test_date_range_single_row(self):
+        """date_range with one row: start == end."""
+        single = make_price_df(start="2020-01-02", days=1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = ParquetCache(tmpdir)
+            cache.save("TEST", single)
+
+            dr = cache.date_range("TEST")
+            assert dr is not None
+            assert dr[0] == dr[1]  # single day: start == end
+
+    def test_merge_into_empty_cache(self):
+        """merge_and_save on a symbol not in cache should just save the data."""
+        df = make_price_df(start="2020-01-02", days=10)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = ParquetCache(tmpdir)
+            result = cache.merge_and_save("NEW", df)
+            assert len(result) == 10
+            assert cache.has("NEW")
+
+
+class TestForwardFillEdgeCases:
+    """Test the MAX_FFILL_DAYS=5 limit in DataManager._prepare()."""
+
+    def test_ffill_within_limit(self):
+        """A 5-day gap (at the limit) should be forward-filled."""
+        source = MockDataSource()
+        df = make_price_df(start="2020-01-02", days=252)
+        # Remove 5 consecutive trading days to create a gap
+        # Days at index positions 20-24 (business days)
+        gap_dates = df.index[20:25]
+        df_with_gap = df.drop(gap_dates)
+        source.add("TEST", df_with_gap)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = DataManager(cache_dir=tmpdir, source=source)
+            result = mgr.load("TEST", date(2020, 1, 2), date(2020, 12, 31))
+            # The gap should be forward-filled, so we should have data for those days
+            for gap_date in gap_dates:
+                gap_d = gap_date.date() if hasattr(gap_date, "date") else gap_date
+                matching = result.index[result.index == pd.Timestamp(gap_d)]
+                assert len(matching) == 1, (
+                    f"Date {gap_d} in 5-day gap should be forward-filled"
+                )
+
+    def test_ffill_beyond_limit_drops_rows(self):
+        """A 6+ day gap exceeds MAX_FFILL_DAYS=5 and should NOT be fully filled."""
+        source = MockDataSource()
+        df = make_price_df(start="2020-01-02", days=252)
+        # Remove 7 consecutive trading days to create a gap beyond the limit
+        gap_dates = df.index[20:27]
+        df_with_gap = df.drop(gap_dates)
+        source.add("TEST", df_with_gap)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = DataManager(cache_dir=tmpdir, source=source)
+            result = mgr.load("TEST", date(2020, 1, 2), date(2020, 12, 31))
+            # With a 7-day gap, only the first 5 are forward-filled;
+            # the remaining 2 days should be dropped (no Close)
+            gap_beyond = gap_dates[5:]  # days 6 and 7 of the gap
+            for gap_date in gap_beyond:
+                gap_d = gap_date.date() if hasattr(gap_date, "date") else gap_date
+                matching = result.index[result.index == pd.Timestamp(gap_d)]
+                assert len(matching) == 0, (
+                    f"Date {gap_d} beyond ffill limit should be dropped"
+                )

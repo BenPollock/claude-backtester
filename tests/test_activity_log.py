@@ -155,3 +155,128 @@ class TestActivityLogCSVExport:
             assert rows[0]["avg_cost_basis"] == ""
             assert rows[1]["action"] == "SELL"
             assert rows[1]["avg_cost_basis"] == "200.0000"
+
+
+class TestActivityLogShortEntry:
+    """Activity log entries for SHORT entry orders."""
+
+    def test_short_entry_creates_sell_activity(self):
+        """A short entry (reason='short_entry') should log a SELL activity
+        with avg_cost_basis=None (since it's an opening trade, not a close).
+        """
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=50,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2),
+                      reason="short_entry")
+        broker.submit_order(order)
+        broker.process_fills(date(2020, 1, 3), {"AAPL": make_row(open_price=150.0)}, portfolio)
+
+        assert len(portfolio.activity_log) == 1
+        entry = portfolio.activity_log[0]
+        assert entry.action == Side.SELL
+        assert entry.symbol == "AAPL"
+        assert entry.quantity == 50
+        assert entry.price == 150.0
+        assert entry.avg_cost_basis is None  # opening trade, no cost basis
+        assert entry.value == 50 * 150.0
+
+    def test_short_entry_portfolio_state(self):
+        """After a short entry, portfolio should have a short position and
+        increased cash (from selling borrowed shares).
+        """
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=50,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2),
+                      reason="short_entry")
+        broker.submit_order(order)
+        broker.process_fills(date(2020, 1, 3), {"AAPL": make_row(open_price=150.0)}, portfolio)
+
+        assert portfolio.has_position("AAPL")
+        assert portfolio.positions["AAPL"].is_short
+        assert portfolio.positions["AAPL"].total_quantity == -50
+        assert portfolio.cash == 100_000.0 + 50 * 150.0
+
+
+class TestActivityLogCoverExit:
+    """Activity log entries for COVER (buy-to-close short) orders."""
+
+    def test_cover_creates_buy_activity_with_cost_basis(self):
+        """A cover (reason='cover') should log a BUY activity with
+        avg_cost_basis set to the short entry price.
+        """
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=100_000.0)
+        # Set up short position manually
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-100, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=-1,  # sentinel: cover all
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+        broker.process_fills(date(2020, 1, 6), {"AAPL": make_row(open_price=140.0)}, portfolio)
+
+        assert len(portfolio.activity_log) == 1
+        entry = portfolio.activity_log[0]
+        assert entry.action == Side.BUY
+        assert entry.symbol == "AAPL"
+        assert entry.quantity == 100
+        assert entry.price == 140.0
+        assert entry.avg_cost_basis == 150.0  # original short entry price
+        assert entry.value == 100 * 140.0
+
+    def test_cover_removes_position(self):
+        """After covering all shares, position should be removed."""
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-100, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=-1,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+        broker.process_fills(date(2020, 1, 6), {"AAPL": make_row(open_price=140.0)}, portfolio)
+
+        assert not portfolio.has_position("AAPL")
+
+
+class TestActivityLogOrdering:
+    """Activity log entries should appear in chronological order."""
+
+    def test_activity_log_chronological_order(self):
+        """Multiple fills across different dates should produce activity log
+        entries in chronological order.
+        """
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=100_000.0)
+
+        # Day 1: BUY AAPL
+        order1 = Order(symbol="AAPL", side=Side.BUY, quantity=50,
+                       order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order1)
+        broker.process_fills(date(2020, 1, 3), {"AAPL": make_row(open_price=100.0)}, portfolio)
+
+        # Day 2: BUY MSFT
+        order2 = Order(symbol="MSFT", side=Side.BUY, quantity=20,
+                       order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order2)
+        broker.process_fills(date(2020, 1, 6), {"MSFT": make_row(open_price=200.0)}, portfolio)
+
+        # Day 3: SELL AAPL
+        order3 = Order(symbol="AAPL", side=Side.SELL, quantity=-1,
+                       order_type=OrderType.MARKET, signal_date=date(2020, 1, 6))
+        broker.submit_order(order3)
+        broker.process_fills(date(2020, 1, 7), {"AAPL": make_row(open_price=110.0)}, portfolio)
+
+        assert len(portfolio.activity_log) == 3
+        dates = [e.date for e in portfolio.activity_log]
+        assert dates == sorted(dates), "Activity log entries must be in chronological order"
+        assert portfolio.activity_log[0].action == Side.BUY
+        assert portfolio.activity_log[0].symbol == "AAPL"
+        assert portfolio.activity_log[1].action == Side.BUY
+        assert portfolio.activity_log[1].symbol == "MSFT"
+        assert portfolio.activity_log[2].action == Side.SELL
+        assert portfolio.activity_log[2].symbol == "AAPL"

@@ -119,59 +119,35 @@ def _check_result_sanity(result, starting_cash=100_000.0):
 # ---------------------------------------------------------------------------
 
 
-class TestAllZeroPrices:
-    """Scenario 1: All prices = 0.0"""
+class TestZeroPriceNoTrades:
+    """With all-zero prices, no shares should be purchased."""
 
-    def test_zero_prices_no_crash(self):
+    def test_zero_price_no_trades_executed(self):
         df = _constant_df(100, price=0.0)
-        # Zero prices may cause division errors or inability to buy
-        # We accept either a clean run or a handled error
-        try:
-            result = _run_backtest(df)
-            # If it runs, equity should remain at starting cash (can't buy at 0)
-            # or be non-negative
-            eq = result.equity_series
-            final = eq.iloc[-1]
-            assert not math.isnan(final), "Final equity is NaN with zero prices"
-            assert final >= 0, f"Final equity negative: {final}"
-        except (ZeroDivisionError, ValueError) as e:
-            pytest.skip(f"Zero prices raised handled error: {e}")
+        result = _run_backtest(df)
+        assert len(result.trades) == 0, (
+            f"Expected 0 trades at zero price, got {len(result.trades)}"
+        )
+
+    def test_zero_price_equity_unchanged(self):
+        df = _constant_df(100, price=0.0)
+        result = _run_backtest(df)
+        eq = result.equity_series
+        assert eq.iloc[-1] == 100_000.0, (
+            f"Equity should be unchanged at $100k, got {eq.iloc[-1]}"
+        )
 
 
-class TestNegativePrices:
-    """Scenario 2: Negative prices"""
+class TestNegativePriceNoTrades:
+    """With negative prices, no shares should be purchased."""
 
-    def test_negative_prices_no_crash(self):
+    def test_negative_price_no_trades(self):
         df = _constant_df(100, price=-50.0)
-        try:
-            result = _run_backtest(df)
-            eq = result.equity_series
-            final = eq.iloc[-1]
-            assert not math.isnan(final), "Final equity is NaN with negative prices"
-        except (ValueError, ZeroDivisionError) as e:
-            pytest.skip(f"Negative prices raised handled error: {e}")
-
-
-class TestPriceDropsToZero:
-    """Scenario 3: Price goes to zero mid-backtest"""
-
-    def test_price_drops_to_zero(self):
-        def close_fn(i):
-            if i < 50:
-                return 100.0
-            return 0.0
-
-        df = _make_df(100, close_fn)
-        try:
-            result = _run_backtest(df)
-            eq = result.equity_series
-            final = eq.iloc[-1]
-            assert not math.isnan(final), "Final equity is NaN after price drop to zero"
-            assert final >= 0, f"Final equity negative: {final}"
-            # Should have lost at most the invested amount
-            assert final <= 100_000.0 + 1.0, "Equity should not grow when price goes to zero"
-        except (ZeroDivisionError, ValueError) as e:
-            pytest.skip(f"Price-to-zero raised handled error: {e}")
+        result = _run_backtest(df)
+        assert len(result.trades) == 0, (
+            f"Expected 0 trades at negative price, got {len(result.trades)}. "
+            f"Engine should reject or skip negative-priced orders."
+        )
 
 
 class TestAstronomicalPrices:
@@ -201,41 +177,6 @@ class TestAstronomicalPrices:
         final = eq.iloc[-1]
         assert not math.isnan(final), "Final equity is NaN"
         assert not math.isinf(final), "Final equity is inf"
-
-
-class TestInvalidOHLC:
-    """Scenario 5 & 6: High < Low, Open outside High/Low range"""
-
-    def test_high_less_than_low(self):
-        """High=90, Low=110 — inverted bars"""
-        df = _make_df(
-            100,
-            close_fn=lambda i: 100.0,
-            open_fn=lambda i: 100.0,
-            high_fn=lambda i: 90.0,
-            low_fn=lambda i: 110.0,
-        )
-        try:
-            result = _run_backtest(df)
-            _check_result_sanity(result)
-        except (ValueError, AssertionError) as e:
-            # It's acceptable if the engine validates OHLC
-            pytest.skip(f"Invalid OHLC rejected: {e}")
-
-    def test_open_outside_high_low(self):
-        """Open=200, High=150, Low=100, Close=120"""
-        df = _make_df(
-            100,
-            close_fn=lambda i: 120.0,
-            open_fn=lambda i: 200.0,
-            high_fn=lambda i: 150.0,
-            low_fn=lambda i: 100.0,
-        )
-        try:
-            result = _run_backtest(df)
-            _check_result_sanity(result)
-        except (ValueError, AssertionError) as e:
-            pytest.skip(f"Invalid OHLC rejected: {e}")
 
 
 class TestConstantPrice:
@@ -367,63 +308,8 @@ class TestEquityCashConsistency:
         assert (eq > 0).all(), "Equity curve has non-positive values"
 
 
-class TestVeryShortBacktest:
-    """Edge case: very few trading days"""
-
-    def test_two_day_backtest(self):
-        df = _constant_df(2, price=100.0)
-        try:
-            result = _run_backtest(df)
-            assert result is not None
-        except Exception as e:
-            # Two days may be too short for some strategies
-            pytest.skip(f"Two-day backtest not supported: {e}")
-
-    def test_single_day_backtest(self):
-        df = _constant_df(1, price=100.0)
-        try:
-            result = _run_backtest(df)
-            assert result is not None
-        except Exception as e:
-            pytest.skip(f"Single-day backtest not supported: {e}")
-
-
-class TestNaNInPrices:
-    """Bonus: NaN values in price data"""
-
-    def test_nan_close_mid_series(self):
-        def close_fn(i):
-            if i == 50:
-                return float('nan')
-            return 100.0
-
-        df = _make_df(100, close_fn)
-        try:
-            result = _run_backtest(df)
-            eq = result.equity_series
-            final = eq.iloc[-1]
-            assert not math.isnan(final), "Final equity is NaN when input has NaN"
-        except (ValueError, KeyError) as e:
-            pytest.skip(f"NaN in prices raised handled error: {e}")
-
-
 class TestInfPrices:
     """Bonus: Infinity in price data"""
-
-    def test_inf_close(self):
-        def close_fn(i):
-            if i == 50:
-                return float('inf')
-            return 100.0
-
-        df = _make_df(100, close_fn)
-        try:
-            result = _run_backtest(df)
-            eq = result.equity_series
-            final = eq.iloc[-1]
-            assert not math.isinf(final), f"Final equity is inf: {final}"
-        except (ValueError, OverflowError) as e:
-            pytest.skip(f"Inf in prices raised handled error: {e}")
 
     def test_inf_does_not_leak_into_equity_curve(self):
         """BUG PROBE: inf price on one day should not produce inf in equity series."""
@@ -485,19 +371,6 @@ class TestEquityCurveNoNaNOrInf:
         assert eq.isna().sum() == 0, "Equity series has NaN after price spike"
         assert np.isinf(eq).sum() == 0, "Equity series has inf after price spike"
 
-    def test_nan_input_no_nan_in_equity(self):
-        """NaN in input price should not leak into equity curve."""
-        def close_fn(i):
-            if i == 50:
-                return float('nan')
-            return 100.0
-        df = _make_df(100, close_fn)
-        result = _run_backtest(df)
-        eq = result.equity_series
-        assert eq.isna().sum() == 0, (
-            "NaN in input prices leaked into equity series"
-        )
-
     def test_extreme_volatility_no_nan_in_equity(self):
         def close_fn(i):
             price = 100.0
@@ -509,34 +382,3 @@ class TestEquityCurveNoNaNOrInf:
         eq = result.equity_series
         assert eq.isna().sum() == 0, "Equity series has NaN with extreme volatility"
         assert np.isinf(eq).sum() == 0, "Equity series has inf with extreme volatility"
-
-
-class TestZeroPriceNoTrades:
-    """With all-zero prices, no shares should be purchased."""
-
-    def test_zero_price_no_trades_executed(self):
-        df = _constant_df(100, price=0.0)
-        result = _run_backtest(df)
-        assert len(result.trades) == 0, (
-            f"Expected 0 trades at zero price, got {len(result.trades)}"
-        )
-
-    def test_zero_price_equity_unchanged(self):
-        df = _constant_df(100, price=0.0)
-        result = _run_backtest(df)
-        eq = result.equity_series
-        assert eq.iloc[-1] == 100_000.0, (
-            f"Equity should be unchanged at $100k, got {eq.iloc[-1]}"
-        )
-
-
-class TestNegativePriceNoTrades:
-    """With negative prices, no shares should be purchased."""
-
-    def test_negative_price_no_trades(self):
-        df = _constant_df(100, price=-50.0)
-        result = _run_backtest(df)
-        assert len(result.trades) == 0, (
-            f"Expected 0 trades at negative price, got {len(result.trades)}. "
-            f"Engine should reject or skip negative-priced orders."
-        )

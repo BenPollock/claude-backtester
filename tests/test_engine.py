@@ -56,15 +56,56 @@ class TestBacktestEngine:
             assert result.equity_series.iloc[0] == 100_000.0
 
     def test_no_lookahead_bias(self):
-        """Signals on day T should fill on day T+1 (at open)."""
+        """Signals on day T should fill on day T+1 at open price.
+        Verify fills happen at the Open price of the fill date, not Close.
+        Also verify that every fill date is strictly after the signal date
+        by checking that no fill happens on the first trading day (since
+        signals require at least one day of data before generating)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = self._make_engine(tmpdir)
             result = engine.run()
 
-            for trade in result.trades:
-                # Entry date should be after signal could have been generated
-                # (entry_date is when the fill happens, not the signal date)
-                assert trade.entry_date >= date(2020, 1, 2)
+            assert len(result.trades) > 0, "Need at least one trade to verify"
+
+            # Get the first trading day from the data
+            first_day = None
+            for symbol, df in result.universe_data.items():
+                day = df.index[0]
+                if first_day is None or day < first_day:
+                    first_day = day
+
+            # Check activity log: fills should occur at Open price AND
+            # no fill should happen on the very first day (signals need prior data)
+            fill_dates = []
+            for entry in result.activity_log:
+                fill_date = entry.date
+                fill_price = entry.price
+                symbol = entry.symbol
+                fill_dates.append(fill_date)
+
+                # No fill should occur on the first trading day
+                # (signals use close of day T, fills on T+1)
+                assert pd.Timestamp(fill_date) > first_day, (
+                    f"Fill for {symbol} on {fill_date} is on/before first day "
+                    f"{first_day}. Fills must be strictly after signal generation."
+                )
+
+                # Look up the actual Open price on the fill date
+                df = result.universe_data.get(symbol)
+                if df is None:
+                    continue
+                ts = pd.Timestamp(fill_date)
+                if ts not in df.index:
+                    continue
+                open_price = df.loc[ts, "Open"]
+                # Fill price should be at the Open (no slippage in this config)
+                assert fill_price == pytest.approx(open_price, rel=1e-6), (
+                    f"Fill for {symbol} on {fill_date}: price {fill_price} != "
+                    f"Open {open_price}. Fills should happen at next-day Open."
+                )
+
+            # Verify fills are spread across multiple dates (not all on one day)
+            assert len(set(fill_dates)) > 1, "Fills should occur on multiple dates"
 
     def test_equity_starts_at_starting_cash(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -110,10 +151,22 @@ class TestBacktestEngine:
             engine = BacktestEngine(config, data_manager=data_mgr)
             result = engine.run()
 
-            # Check equity history: at no point should we exceed 5 positions
-            # (We can't check this directly from result, but the engine logic enforces it)
-            # If it ran without errors, the constraint was respected
+            # Verify position count never exceeded max_positions by checking
+            # the activity log: count concurrent positions at each date
             assert result is not None
+            positions_held: dict[str, bool] = {}  # symbol -> currently_held
+            max_concurrent = 0
+            for entry in result.activity_log:
+                if entry.action.name == "BUY":
+                    positions_held[entry.symbol] = True
+                elif entry.action.name == "SELL":
+                    positions_held.pop(entry.symbol, None)
+                current_count = len(positions_held)
+                max_concurrent = max(max_concurrent, current_count)
+
+            assert max_concurrent <= 5, (
+                f"Max concurrent positions was {max_concurrent}, exceeding limit of 5"
+            )
 
     def test_benchmark_equity_tracked(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -121,6 +174,19 @@ class TestBacktestEngine:
             result = engine.run()
             assert result.benchmark_equity is not None
             assert len(result.benchmark_equity) > 0
+            # Verify benchmark equity is computed as shares * close_price
+            # First value should equal starting cash (shares = cash / first_close)
+            first_date, first_value = result.benchmark_equity[0]
+            assert first_value == pytest.approx(100_000.0, abs=1.0)
+            # Last value should reflect the price change of the benchmark
+            last_date, last_value = result.benchmark_equity[-1]
+            # Benchmark should change proportionally to the underlying price
+            assert last_value > 0
+            # Verify a few intermediate values are consistent
+            # (monotonic check would be wrong since prices fluctuate,
+            # but values should all be positive)
+            for d, v in result.benchmark_equity:
+                assert v > 0, f"Benchmark equity should be positive, got {v} on {d}"
 
     def test_benchmark_equity_has_daily_data_points(self):
         """Benchmark equity should have one data point per trading day
@@ -307,6 +373,70 @@ class TestBacktestEngine:
 
             # Constrained run should have fewer total BUY fills
             assert buys_constrained <= buys_unconstrained
+
+    def test_zero_volume_days(self):
+        """Engine should handle zero-volume days without crashing.
+        Orders on zero-volume days may be skipped by volume constraints."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = MockDataSource()
+            df = make_price_df(start="2020-01-02", days=252, start_price=100.0)
+            # Set volume to 0 for a stretch of days (days 50-60)
+            df_zeroed = df.copy()
+            df_zeroed.iloc[50:60, df_zeroed.columns.get_loc("Volume")] = 0
+            source.add("TEST", df_zeroed)
+
+            config = BacktestConfig(
+                strategy_name="sma_crossover",
+                tickers=["TEST"],
+                benchmark="TEST",
+                start_date=date(2020, 1, 2),
+                end_date=date(2020, 12, 31),
+                starting_cash=100_000.0,
+                max_positions=10,
+                max_alloc_pct=0.20,
+                fee_per_trade=0.0,
+                slippage_bps=0.0,
+                data_cache_dir=tmpdir,
+                strategy_params={"sma_fast": 20, "sma_slow": 50},
+            )
+            data_mgr = DataManager(cache_dir=tmpdir, source=source)
+            engine = BacktestEngine(config, data_manager=data_mgr)
+            result = engine.run()
+
+            # Engine should complete without errors
+            assert result is not None
+            assert len(result.portfolio.equity_history) > 0
+            # All positions should be closed at end
+            assert result.portfolio.num_positions == 0
+
+    def test_fill_delay_respected(self):
+        """Orders submitted on day T must NOT fill on day T.
+        They fill on day T+1 (next call to process_fills).
+        Verify by checking that no activity log entry's fill date matches
+        a date where no prior-day signal could have been generated."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = self._make_engine(tmpdir)
+            result = engine.run()
+
+            assert len(result.activity_log) > 0, "Need activity to verify delay"
+
+            # Get trading days from the equity history
+            trading_days = [d for d, _ in result.portfolio.equity_history]
+
+            for entry in result.activity_log:
+                fill_date = entry.date
+                # The fill_date must have a preceding trading day
+                # (because the signal was generated the day before)
+                fill_idx = None
+                for i, td in enumerate(trading_days):
+                    if td == fill_date:
+                        fill_idx = i
+                        break
+                if fill_idx is not None:
+                    assert fill_idx > 0, (
+                        f"Fill on {fill_date} for {entry.symbol} cannot happen on "
+                        f"the first trading day — no signal could have been generated yet."
+                    )
 
     def test_default_size_order(self):
         """Strategy.size_order() BUY should return correct share count."""

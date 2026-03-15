@@ -83,7 +83,7 @@ def stochastic(
     """
     low_min = df["Low"].rolling(window=k_period, min_periods=k_period).min()
     high_max = df["High"].rolling(window=k_period, min_periods=k_period).max()
-    k = 100.0 * (df["Close"] - low_min) / (high_max - low_min)
+    k = 100.0 * (df["Close"] - low_min) / (high_max - low_min).replace(0, np.nan)
     d = k.rolling(window=d_period, min_periods=d_period).mean()
     return k, d
 
@@ -183,7 +183,11 @@ def mfi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     pos_sum = pos_mf.rolling(window=period, min_periods=period).sum()
     neg_sum = neg_mf.rolling(window=period, min_periods=period).sum()
     ratio = pos_sum / neg_sum.replace(0, np.nan)
-    return 100.0 - (100.0 / (1.0 + ratio))
+    mfi_val = 100.0 - (100.0 / (1.0 + ratio))
+    # When neg_sum=0 (all positive flow), ratio is NaN; MFI should be 100
+    all_positive = (neg_sum == 0) & neg_sum.notna()
+    mfi_val = mfi_val.where(~all_positive, 100.0)
+    return mfi_val
 
 
 def roc(series: pd.Series, period: int = 12) -> pd.Series:

@@ -147,8 +147,16 @@ class SimulatedBroker:
         """
         fills: list[Fill] = []
         remaining_orders: list[Order] = []
+        # Track resolved bracket parent IDs to prevent OCO race conditions
+        # where both bracket children could fill in the same process_fills call
+        resolved_bracket_parents: set[str] = set()
 
         for order in self._pending_orders:
+            # Defensive: skip bracket children whose sibling already filled this cycle
+            if order.parent_id and order.parent_id in resolved_bracket_parents:
+                order.status = OrderStatus.CANCELLED
+                continue
+
             row = market_data.get(order.symbol)
             if row is None or pd.isna(row.get("Open")):
                 # No market data -- keep order pending
@@ -182,7 +190,12 @@ class SimulatedBroker:
             if order.side == Side.BUY and quantity < 0:
                 pos = portfolio.get_position(order.symbol)
                 if pos is None or not pos.is_short:
+                    # BUY with sentinel qty should only occur for short covers;
+                    # cancel if position is missing or long to prevent double-buy.
                     order.status = OrderStatus.CANCELLED
+                    logger.warning(
+                        f"BUY sentinel (-1) for {order.symbol} with no short position — cancelled"
+                    )
                     continue
                 quantity = abs(pos.total_quantity)
 
@@ -192,6 +205,12 @@ class SimulatedBroker:
                 if max_fillable > 0 and quantity > max_fillable:
                     if self._partial_fill_policy == "requeue":
                         remainder_qty = quantity - max_fillable
+                        # Preserve original expiry; default to 5 trading days
+                        # from today to prevent infinite GTC orders
+                        remainder_expiry = order.expiry_date
+                        if remainder_expiry is None:
+                            from datetime import timedelta
+                            remainder_expiry = current_date + timedelta(days=7)
                         remainder_order = Order(
                             symbol=order.symbol,
                             side=order.side,
@@ -201,34 +220,36 @@ class SimulatedBroker:
                             limit_price=order.limit_price,
                             stop_price=order.stop_price,
                             time_in_force="GTC",
+                            expiry_date=remainder_expiry,
                             reason=order.reason,
                         )
                         remaining_orders.append(remainder_order)
                     quantity = max_fillable
 
-            # Update order.quantity so slippage models use the resolved value
-            order.quantity = quantity
-
-            # Apply slippage around the base fill price
-            fill_price = self._slippage.compute(order, base_price, volume)
+            # Temporarily set resolved quantity for slippage models, then restore
+            original_quantity = order.quantity
+            try:
+                order.quantity = quantity
+                fill_price = self._slippage.compute(order, base_price, volume)
+            finally:
+                order.quantity = original_quantity
             if fill_price < 0:
-                fill_price = 0.0
+                # Negative fill price is unrealistic; cancel fill, keep order pending
+                self._handle_unfilled_order(order, current_date, remaining_orders)
+                logger.debug(f"Cancelled fill for {order.symbol}: negative fill price {fill_price:.4f}")
+                continue
             commission = self._fees.compute(order, fill_price, abs(quantity))
 
             if order.side == Side.BUY:
                 total_cost = fill_price * quantity + commission
                 if total_cost > portfolio.cash:
                     # Reduce quantity to fit budget
-                    quantity = int((portfolio.cash - commission) // fill_price)
+                    quantity = max(0, int((portfolio.cash - commission) // fill_price))
                     if quantity <= 0:
                         order.status = OrderStatus.CANCELLED
                         logger.debug(f"Cancelled {order.symbol} BUY: insufficient cash")
                         continue
                     commission = self._fees.compute(order, fill_price, quantity)
-
-            elif order.side == Side.SELL and quantity < 0:
-                # This is a short entry (negative quantity on a SELL order)
-                quantity = abs(quantity)
 
             # Execute fill -- slippage is relative to the base fill price
             slippage_amount = abs(fill_price - base_price)
@@ -319,6 +340,7 @@ class SimulatedBroker:
 
             # Gap 13: OCO cancellation — when a bracketed order fills, cancel siblings
             if order.parent_id and order.parent_id in self._active_brackets:
+                resolved_bracket_parents.add(order.parent_id)
                 siblings = self._active_brackets.pop(order.parent_id)
                 for sibling in siblings:
                     if sibling.id != order.id:

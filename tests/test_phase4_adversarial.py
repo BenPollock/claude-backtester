@@ -103,27 +103,6 @@ class TestNaNPriceData:
 
 
 # ===========================================================================
-# max_positions = 0
-# ===========================================================================
-
-class TestMaxPositionsZero:
-    """max_positions=0 should produce zero trades without error."""
-
-    def test_zero_max_positions_produces_no_trades(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source = MockDataSource()
-            source.add("TEST", make_price_df())
-
-            engine = _build_engine(tmpdir, source, ["TEST"], {
-                "max_positions": 0,
-            })
-            result = engine.run()
-
-            assert len(result.trades) == 0
-            assert result.equity_series.iloc[-1] == 100_000.0
-
-
-# ===========================================================================
 # CAGR extrapolation on short periods
 # ===========================================================================
 

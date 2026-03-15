@@ -74,6 +74,7 @@ class BacktestEngine:
             ])
         else:
             fees = PerTradeFee(fee=config.fee_per_trade)
+        self._fees = fees
         self._broker = SimulatedBroker(
             slippage=slippage, fees=fees,
             max_volume_pct=config.max_volume_pct,
@@ -597,6 +598,22 @@ class BacktestEngine:
             )
             self._broker.submit_order(order)
 
+    def _compute_force_close_fee(
+        self, symbol: str, side: Side, quantity: int, price: float, day
+    ) -> float:
+        """Compute commission for a force-close or delisting exit."""
+        dummy_order = Order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.MARKET,
+            signal_date=day,
+        )
+        fees = getattr(self, "_fees", None)
+        if fees is None:
+            return 0.0
+        return fees.compute(dummy_order, price, quantity)
+
     def _check_delistings(self, day, today_data, portfolio) -> None:
         """Gap 2: Force-close positions for delisted symbols (absent >5 days)."""
         for symbol in list(portfolio.positions.keys()):
@@ -613,14 +630,21 @@ class BacktestEngine:
                             f"Force-closing at last known price ${price:.2f}"
                         )
                         if pos.total_quantity > 0:
-                            trades = pos.sell_lots_fifo(pos.total_quantity, price, day, 0.0)
+                            qty = pos.total_quantity
+                            commission = self._compute_force_close_fee(
+                                symbol, Side.SELL, qty, price, day
+                            )
+                            trades = pos.sell_lots_fifo(qty, price, day, commission)
                             portfolio.trade_log.extend(trades)
-                            portfolio.cash += price * sum(t.quantity for t in trades)
+                            portfolio.cash += price * qty - commission
                         elif pos.total_quantity < 0:
                             cover_qty = abs(pos.total_quantity)
-                            trades = pos.close_lots_fifo(cover_qty, price, day, 0.0)
+                            commission = self._compute_force_close_fee(
+                                symbol, Side.BUY, cover_qty, price, day
+                            )
+                            trades = pos.close_lots_fifo(cover_qty, price, day, commission)
                             portfolio.trade_log.extend(trades)
-                            portfolio.cash -= price * cover_qty
+                            portfolio.cash -= cover_qty * price + commission
                         portfolio.close_position(symbol)
                     del self._missing_days[symbol]
 
@@ -732,9 +756,13 @@ class BacktestEngine:
                         f"Force-close {symbol}: no market price, using entry price ${price:.2f}"
                     )
                 if price > 0:
-                    trades = pos.sell_lots_fifo(pos.total_quantity, price, last_date, 0.0)
+                    qty = pos.total_quantity
+                    commission = self._compute_force_close_fee(
+                        symbol, Side.SELL, qty, price, last_date
+                    )
+                    trades = pos.sell_lots_fifo(qty, price, last_date, commission)
                     portfolio.trade_log.extend(trades)
-                    portfolio.cash += price * sum(t.quantity for t in trades)
+                    portfolio.cash += price * qty - commission
                     portfolio.close_position(symbol)
                     logger.debug(f"Force-closed long {symbol}: {len(trades)} lots")
             elif pos.total_quantity < 0:
@@ -747,8 +775,11 @@ class BacktestEngine:
                     )
                 if price > 0:
                     cover_qty = abs(pos.total_quantity)
-                    trades = pos.close_lots_fifo(cover_qty, price, last_date, 0.0)
+                    commission = self._compute_force_close_fee(
+                        symbol, Side.BUY, cover_qty, price, last_date
+                    )
+                    trades = pos.close_lots_fifo(cover_qty, price, last_date, commission)
                     portfolio.trade_log.extend(trades)
-                    portfolio.cash -= price * cover_qty  # pay to buy back
+                    portfolio.cash -= cover_qty * price + commission
                     portfolio.close_position(symbol)
                     logger.debug(f"Force-closed short {symbol}: {len(trades)} lots")

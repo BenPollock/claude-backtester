@@ -5,6 +5,8 @@ from datetime import date
 
 from backtester.portfolio.order import Trade
 
+_NAN = float("nan")
+
 
 @dataclass
 class Lot:
@@ -145,7 +147,7 @@ class Position:
             total_fees = entry_comm + exit_comm
 
             pnl = (exit_price - lot.entry_price) * sell_qty - total_fees
-            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else 0.0
+            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else _NAN
 
             trades.append(Trade(
                 symbol=self.symbol,
@@ -165,7 +167,7 @@ class Position:
                 self.lots.pop(0)
             else:
                 # Adjust remaining commission for partial lot
-                lot.commission -= entry_comm
+                lot.commission = max(0.0, lot.commission - entry_comm)
 
             remaining -= sell_qty
 
@@ -189,7 +191,7 @@ class Position:
             total_fees = entry_comm + exit_comm
 
             pnl = (exit_price - lot.entry_price) * sell_qty - total_fees
-            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else 0.0
+            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else _NAN
 
             trades.append(Trade(
                 symbol=self.symbol,
@@ -208,7 +210,7 @@ class Position:
             if lot.quantity == 0:
                 self.lots.pop()  # remove from end
             else:
-                lot.commission -= entry_comm
+                lot.commission = max(0.0, lot.commission - entry_comm)
 
             remaining -= sell_qty
 
@@ -220,15 +222,17 @@ class Position:
         if quantity > self.total_quantity:
             raise ValueError(f"Cannot sell {quantity} shares of {self.symbol}; only hold {self.total_quantity}")
 
-        # Sort lots by entry_price
-        self.lots.sort(key=lambda lot: lot.entry_price, reverse=highest_first)
+        # Sort a copy to determine sell order — do NOT mutate self.lots order
+        sorted_lots = sorted(self.lots, key=lambda lot: lot.entry_price, reverse=highest_first)
 
         trades: list[Trade] = []
         remaining = quantity
         commission_per_share = exit_commission / quantity if quantity > 0 else 0.0
+        lots_to_remove: list[Lot] = []
 
-        while remaining > 0 and self.lots:
-            lot = self.lots[0]
+        for lot in sorted_lots:
+            if remaining <= 0:
+                break
             sell_qty = min(remaining, lot.quantity)
 
             entry_comm = lot.commission * (sell_qty / lot.quantity) if lot.quantity > 0 else 0.0
@@ -236,7 +240,7 @@ class Position:
             total_fees = entry_comm + exit_comm
 
             pnl = (exit_price - lot.entry_price) * sell_qty - total_fees
-            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else 0.0
+            pnl_pct = (exit_price / lot.entry_price - 1.0) if lot.entry_price > 0 else _NAN
 
             trades.append(Trade(
                 symbol=self.symbol,
@@ -253,11 +257,15 @@ class Position:
 
             lot.quantity -= sell_qty
             if lot.quantity == 0:
-                self.lots.pop(0)
+                lots_to_remove.append(lot)
             else:
-                lot.commission -= entry_comm
+                lot.commission = max(0.0, lot.commission - entry_comm)
 
             remaining -= sell_qty
+
+        # Remove fully consumed lots from self.lots, preserving original order
+        for lot in lots_to_remove:
+            self.lots.remove(lot)
 
         return trades
 
@@ -271,6 +279,11 @@ class Position:
         PnL for shorts: (entry_price - exit_price) * qty - fees
         (profit when price drops).
         """
+        if self.total_quantity >= 0:
+            raise ValueError(
+                f"close_lots_fifo() can only be called on short positions, "
+                f"but {self.symbol} has qty={self.total_quantity}"
+            )
         abs_held = abs(self.total_quantity)
         if quantity > abs_held:
             raise ValueError(
@@ -313,7 +326,7 @@ class Position:
             if lot.quantity == 0:
                 self.lots.pop(0)
             else:
-                lot.commission -= entry_comm
+                lot.commission = max(0.0, lot.commission - entry_comm)
 
             remaining -= cover_qty
 

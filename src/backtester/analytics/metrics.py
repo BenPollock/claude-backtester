@@ -203,6 +203,8 @@ def capture_ratio(equity_series: pd.Series, benchmark_series: pd.Series,
         mask = b < 0
     if mask.sum() == 0:
         return 0.0
+    if b[mask].mean() == 0:
+        return 0.0
     return s[mask].mean() / b[mask].mean() * 100.0
 
 

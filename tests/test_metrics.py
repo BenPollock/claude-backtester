@@ -9,7 +9,7 @@ from backtester.analytics.metrics import (
     total_return, win_rate, profit_factor, compute_all_metrics,
     calmar_ratio, beta, alpha, information_ratio, tracking_error, capture_ratio,
     trade_expectancy, avg_win_loss, holding_period_stats, max_consecutive,
-    exposure_time,
+    exposure_time, historical_var, cvar, omega_ratio, treynor_ratio,
 )
 from backtester.portfolio.order import Trade
 from datetime import date
@@ -40,7 +40,13 @@ class TestMetrics:
         # Steadily increasing equity should have positive Sharpe
         values = np.linspace(100, 120, 252)
         equity = make_equity(values)
-        assert sharpe_ratio(equity) > 0
+        result = sharpe_ratio(equity)
+        assert result > 0
+        # Verify: for linearly increasing equity, daily return is constant
+        # daily_return = (120/100)^(1/251) - 1 ≈ 0.000722
+        # std of constant returns is very small (not zero due to floating point)
+        # Sharpe should be very high (>10) since std is near zero
+        assert result > 10.0
 
     def test_sharpe_flat(self):
         equity = make_equity([100, 100, 100, 100])
@@ -81,6 +87,9 @@ class TestMetrics:
         result = sortino_ratio(equity)
         assert result > 0
         assert np.isfinite(result)
+        # Sortino should be higher than Sharpe since it only penalizes downside vol
+        sharpe_val = sharpe_ratio(equity)
+        assert result > sharpe_val
 
     def test_sortino_no_downside_returns_inf(self):
         # Monotonically increasing — no negative returns
@@ -174,9 +183,9 @@ class TestBenchmarkRelative:
         assert result > 0
 
     def test_beta_identical(self):
-        # Beta of a series vs itself should be ~1.0
+        # Beta of a series vs itself should be exactly 1.0
         result = beta(self.equity, self.equity)
-        assert abs(result - 1.0) < 0.01
+        assert result == pytest.approx(1.0, abs=1e-10)
 
     def test_alpha_outperformance(self):
         # Use noisy returns where strategy clearly outperforms to get positive alpha
@@ -191,10 +200,20 @@ class TestBenchmarkRelative:
         eq = make_equity(strat_vals)
         result = alpha(eq, bm)
         assert result > 0
+        # Jensen's alpha = annualized excess return over CAPM prediction
+        # With 0.001 daily excess and beta ~1, alpha ≈ 0.001 * 252 = 0.252
+        assert result == pytest.approx(0.252, abs=0.05)
 
     def test_information_ratio(self):
         result = information_ratio(self.equity, self.benchmark)
         assert np.isfinite(result)
+        # Equity outperforms benchmark (130 vs 120), so IR should be positive
+        assert result > 0
+
+    def test_information_ratio_identical(self):
+        # Identical series should have IR = 0 (no active return)
+        result = information_ratio(self.equity, self.equity)
+        assert result == pytest.approx(0.0, abs=1e-10)
 
     def test_tracking_error(self):
         result = tracking_error(self.equity, self.benchmark)
@@ -207,6 +226,11 @@ class TestBenchmarkRelative:
     def test_capture_ratio_up(self):
         result = capture_ratio(self.equity, self.benchmark, "up")
         assert result > 0
+        # Both are linearly increasing, equity grows faster (30% vs 20%)
+        # Up capture = mean(strat_ret on up days) / mean(bm_ret on up days) * 100
+        # Since both are linear with all positive returns, ratio ≈ 130/120 * 100
+        # but it's return-based so approximately (30/20)*100 = 150 is an upper bound
+        assert result > 100.0  # Captures more than benchmark on up days
 
     def test_capture_ratio_down(self):
         result = capture_ratio(self.equity, self.benchmark, "down")
@@ -222,6 +246,119 @@ class TestBenchmarkRelative:
         assert "tracking_error" in m
         assert "up_capture" in m
         assert "down_capture" in m
+
+
+class TestHistoricalVaR:
+    def test_var_basic(self):
+        """VaR at 95% should return the 5th percentile of daily returns."""
+        rng = np.random.default_rng(42)
+        values = [100.0]
+        for _ in range(999):
+            values.append(values[-1] * (1 + rng.normal(0, 0.01)))
+        equity = make_equity(values)
+        result = historical_var(equity, confidence=0.95)
+        # VaR should be negative (it's a loss percentile)
+        assert result < 0
+        # Manual check: compute returns and verify percentile
+        returns = equity.pct_change().dropna()
+        expected = float(np.percentile(returns, 5))
+        assert result == pytest.approx(expected, rel=1e-6)
+
+    def test_var_monotonic_increase(self):
+        """Monotonically increasing equity: 5th percentile should still be positive."""
+        equity = make_equity(np.linspace(100, 200, 252))
+        result = historical_var(equity, confidence=0.95)
+        # All returns are positive, so 5th percentile is also positive
+        assert result > 0
+
+    def test_var_few_returns(self):
+        equity = make_equity([100])
+        assert historical_var(equity) == 0.0
+
+
+class TestCVaR:
+    def test_cvar_basic(self):
+        """CVaR should be <= VaR (further into the tail)."""
+        rng = np.random.default_rng(42)
+        values = [100.0]
+        for _ in range(999):
+            values.append(values[-1] * (1 + rng.normal(0, 0.01)))
+        equity = make_equity(values)
+        var_val = historical_var(equity, confidence=0.95)
+        cvar_val = cvar(equity, confidence=0.95)
+        # CVaR is the mean of returns below VaR, so it should be <= VaR
+        assert cvar_val <= var_val
+
+    def test_cvar_manual(self):
+        """CVaR should equal mean of returns at or below the VaR threshold."""
+        rng = np.random.default_rng(42)
+        values = [100.0]
+        for _ in range(999):
+            values.append(values[-1] * (1 + rng.normal(0, 0.01)))
+        equity = make_equity(values)
+        returns = equity.pct_change().dropna()
+        var_val = float(np.percentile(returns, 5))
+        expected_cvar = float(returns[returns <= var_val].mean())
+        result = cvar(equity, confidence=0.95)
+        assert result == pytest.approx(expected_cvar, rel=1e-6)
+
+    def test_cvar_few_returns(self):
+        equity = make_equity([100])
+        assert cvar(equity) == 0.0
+
+
+class TestOmegaRatio:
+    def test_omega_positive_returns(self):
+        """Omega ratio > 1 for positive-mean returns (gains exceed losses)."""
+        rng = np.random.default_rng(42)
+        values = [100.0]
+        for _ in range(251):
+            values.append(values[-1] * (1 + 0.001 + rng.normal(0, 0.005)))
+        equity = make_equity(values)
+        result = omega_ratio(equity, threshold=0.0)
+        assert result > 1.0
+
+    def test_omega_all_positive(self):
+        """Omega = inf when all returns are positive (no losses below threshold)."""
+        equity = make_equity(np.linspace(100, 120, 50))
+        result = omega_ratio(equity, threshold=0.0)
+        assert result == float("inf")
+
+    def test_omega_manual_calculation(self):
+        """Verify Omega ratio against manual calculation."""
+        equity = make_equity([100, 110, 105, 115, 108])
+        returns = equity.pct_change().dropna()
+        gains = returns[returns > 0] - 0.0
+        losses = 0.0 - returns[returns <= 0]
+        expected = float(gains.sum() / losses.sum())
+        result = omega_ratio(equity, threshold=0.0)
+        assert result == pytest.approx(expected, rel=1e-6)
+
+    def test_omega_few_returns(self):
+        equity = make_equity([100])
+        assert omega_ratio(equity) == 0.0
+
+
+class TestTreynorRatio:
+    def test_treynor_basic(self):
+        """Treynor ratio = (CAGR - rf) / beta."""
+        equity = make_equity(np.linspace(100, 130, 252))
+        benchmark = make_equity(np.linspace(100, 120, 252))
+        result = treynor_ratio(equity, benchmark)
+        # Manual: CAGR / beta
+        c = cagr(equity)
+        b = beta(equity, benchmark)
+        expected = c / b
+        assert result == pytest.approx(expected, rel=1e-6)
+
+    def test_treynor_zero_beta(self):
+        """Treynor should return 0 when beta is 0."""
+        # Strategy returns uncorrelated with benchmark
+        equity = make_equity([100, 110, 100, 110, 100])
+        benchmark = make_equity([100, 100, 110, 100, 110])
+        result = treynor_ratio(equity, benchmark)
+        # Beta should be near 0 or negative, but if exactly 0, returns 0
+        assert np.isfinite(result)
 
 
 class TestTradeLevel:
@@ -284,3 +421,104 @@ class TestTradeLevel:
     def test_exposure_time_no_trades(self):
         equity = make_equity([100, 110, 120])
         assert exposure_time(equity, []) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Strengthened metric tests — edge cases and value verification
+# ---------------------------------------------------------------------------
+
+class TestMetricsEdgeCases:
+    def test_cagr_negative_return(self):
+        """CAGR should be negative when equity declines."""
+        # 100 -> 80 over ~1 year (252 business days)
+        values = np.linspace(100, 80, 252)
+        equity = make_equity(values)
+        result = cagr(equity)
+        assert result < 0
+        # Approximately -20% CAGR
+        assert result == pytest.approx(-0.20, abs=0.03)
+
+    def test_sharpe_declining_equity(self):
+        """Sharpe should be negative for consistently declining equity."""
+        values = np.linspace(100, 70, 252)
+        equity = make_equity(values)
+        result = sharpe_ratio(equity)
+        assert result < 0
+        # Linearly declining equity has constant negative daily returns,
+        # so Sharpe should be very negative (large magnitude)
+        assert result < -10.0
+
+    def test_alpha_underperformance(self):
+        """Alpha should be negative when strategy consistently underperforms."""
+        rng = np.random.default_rng(99)
+        bm_vals = [100.0]
+        strat_vals = [100.0]
+        for _ in range(251):
+            r = rng.normal(0.0003, 0.01)
+            bm_vals.append(bm_vals[-1] * (1 + r))
+            strat_vals.append(strat_vals[-1] * (1 + r - 0.001))  # consistent drag
+        bm = make_equity(bm_vals)
+        eq = make_equity(strat_vals)
+        result = alpha(eq, bm)
+        assert result < 0
+        # Daily underperformance of 0.001 => annualized alpha ~ -0.252
+        assert result == pytest.approx(-0.252, abs=0.05)
+
+    def test_omega_ratio_nonzero_threshold(self):
+        """Omega with a positive threshold should be lower than with threshold=0."""
+        rng = np.random.default_rng(42)
+        values = [100.0]
+        for _ in range(251):
+            values.append(values[-1] * (1 + 0.001 + rng.normal(0, 0.005)))
+        equity = make_equity(values)
+        omega_zero = omega_ratio(equity, threshold=0.0)
+        omega_high = omega_ratio(equity, threshold=0.001)
+        # Higher threshold means more returns fall below it -> lower omega
+        assert omega_high < omega_zero
+        # Both should be positive (net positive returns)
+        assert omega_high > 0
+        # Manual verification at nonzero threshold
+        returns = equity.pct_change().dropna()
+        gains = returns[returns > 0.001] - 0.001
+        losses = 0.001 - returns[returns <= 0.001]
+        expected = float(gains.sum() / losses.sum())
+        assert omega_high == pytest.approx(expected, rel=1e-6)
+
+    def test_capture_ratio_down_value(self):
+        """Down capture should reflect behavior in down markets.
+        A strategy that loses less than benchmark should have down capture < 100."""
+        rng = np.random.default_rng(55)
+        bm_vals = [100.0]
+        strat_vals = [100.0]
+        for _ in range(251):
+            r = rng.normal(0.0, 0.015)
+            bm_vals.append(bm_vals[-1] * (1 + r))
+            # Strategy captures only 80% of benchmark moves
+            strat_vals.append(strat_vals[-1] * (1 + 0.8 * r))
+        bm = make_equity(bm_vals)
+        eq = make_equity(strat_vals)
+        result = capture_ratio(eq, bm, "down")
+        # Strategy captures ~80% of down moves -> down capture ~ 80
+        assert result == pytest.approx(80.0, abs=10.0)
+
+    def test_treynor_negative_cagr(self):
+        """Treynor should be negative when CAGR is negative (declining equity)."""
+        # Declining strategy, rising benchmark
+        values_strat = np.linspace(100, 80, 252)
+        values_bm = np.linspace(100, 120, 252)
+        equity = make_equity(values_strat)
+        benchmark = make_equity(values_bm)
+        result = treynor_ratio(equity, benchmark)
+        # CAGR is negative, beta could be positive or negative,
+        # but with inversely correlated returns, beta should be negative
+        # Treynor = negative_cagr / negative_beta could be positive
+        # OR if beta is near 0, returns 0.
+        # The key: result should be finite and computable.
+        assert np.isfinite(result)
+        # Verify manual calculation
+        c = cagr(equity)
+        b = beta(equity, benchmark)
+        if b != 0:
+            assert result == pytest.approx(c / b, rel=1e-6)
+        else:
+            assert result == 0.0

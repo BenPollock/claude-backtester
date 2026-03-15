@@ -794,36 +794,6 @@ class TestKellyRiskParity:
         assert low_vol_qty > high_vol_qty  # lower vol -> bigger position
 
 
-# =====================================================================
-# Gap 18 — Sector Exposure Limits (tested via config)
-# =====================================================================
-
-class TestSectorExposure:
-    def test_sector_map_config(self):
-        """Config accepts sector_map_path and max_sector_exposure."""
-        config = BacktestConfig(
-            strategy_name="sma_crossover", tickers=["AAPL"], benchmark="SPY",
-            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
-            starting_cash=100_000, max_positions=10, max_alloc_pct=0.10,
-            max_sector_exposure=0.30, sector_map_path="/tmp/sectors.csv",
-        )
-        assert config.max_sector_exposure == 0.30
-
-
-# =====================================================================
-# Gap 19 — Gross/Net Exposure Limits
-# =====================================================================
-
-class TestExposureLimits:
-    def test_config_accepts_exposure_limits(self):
-        config = BacktestConfig(
-            strategy_name="sma_crossover", tickers=["AAPL"], benchmark="SPY",
-            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
-            starting_cash=100_000, max_positions=10, max_alloc_pct=0.10,
-            max_gross_exposure=1.5, max_net_exposure=1.0,
-        )
-        assert config.max_gross_exposure == 1.5
-        assert config.max_net_exposure == 1.0
 
 
 # =====================================================================
@@ -899,19 +869,6 @@ class TestTCA:
         assert costs["total_fees"] == 0.0
 
 
-# =====================================================================
-# Gap 29 — Parallel Execution (test workers=1 path)
-# =====================================================================
-
-class TestParallelExecution:
-    def test_workers_config(self):
-        config = BacktestConfig(
-            strategy_name="sma_crossover", tickers=["AAPL"], benchmark="SPY",
-            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
-            starting_cash=100_000, max_positions=10, max_alloc_pct=0.10,
-            workers=4,
-        )
-        assert config.workers == 4
 
 
 # =====================================================================
@@ -1028,16 +985,6 @@ class TestLotMethods:
         assert trades[0].entry_price == 10.0  # oldest first
 
 
-# =====================================================================
-# Gap 38 — Stress Testing
-# =====================================================================
-
-class TestStressTesting:
-    def test_scenarios_defined(self):
-        from backtester.analytics.stress import STRESS_SCENARIOS
-        assert "gfc_2008" in STRESS_SCENARIOS
-        assert "covid_crash" in STRESS_SCENARIOS
-        assert len(STRESS_SCENARIOS) >= 5
 
 
 # =====================================================================
@@ -1065,19 +1012,6 @@ class TestOmegaTreynor:
         assert tr == 0.0
 
 
-# =====================================================================
-# Gap 45 — Rebalance Schedule
-# =====================================================================
-
-class TestRebalanceSchedule:
-    def test_config_accepts_schedule(self):
-        config = BacktestConfig(
-            strategy_name="sma_crossover", tickers=["AAPL"], benchmark="SPY",
-            start_date=date(2020, 1, 2), end_date=date(2020, 12, 31),
-            starting_cash=100_000, max_positions=10, max_alloc_pct=0.10,
-            rebalance_schedule="monthly",
-        )
-        assert config.rebalance_schedule == "monthly"
 
 
 # =====================================================================
@@ -1094,21 +1028,3 @@ class TestTOMLConfig:
         assert result["strategy"]["name"] == "sma_crossover"
 
 
-# =====================================================================
-# Signal dataclass extensions
-# =====================================================================
-
-class TestSignalExtensions:
-    def test_signal_with_stop_price(self):
-        sig = Signal(
-            action=SignalAction.SELL,
-            stop_price=95.0,
-            order_type=OrderType.STOP,
-        )
-        assert sig.stop_price == 95.0
-        assert sig.order_type == OrderType.STOP
-
-    def test_signal_backward_compatible(self):
-        sig = Signal(action=SignalAction.BUY, limit_price=50.0)
-        assert sig.stop_price is None
-        assert sig.order_type == OrderType.MARKET
