@@ -285,7 +285,12 @@ def ichimoku(
     senkou_a = ((tenkan_sen + kijun_sen) / 2.0).shift(displacement)
     senkou_b_val = ((high.rolling(senkou_b, min_periods=senkou_b).max() +
                      low.rolling(senkou_b, min_periods=senkou_b).min()) / 2.0).shift(displacement)
-    chikou = df["Close"].shift(-displacement)
+    # Chikou span: Close shifted FORWARD (backward-looking) so that at time T
+    # it gives Close[T - displacement].  The standard Ichimoku chikou comparison
+    # "current price vs price N periods ago" becomes Close[T] > chikou[T].
+    # Using shift(+displacement) prevents lookahead bias -- shift(-displacement)
+    # would give future data (Close[T + displacement]).
+    chikou = df["Close"].shift(displacement)
 
     return tenkan_sen, kijun_sen, senkou_a, senkou_b_val, chikou
 

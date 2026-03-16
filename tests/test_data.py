@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from backtester.data.cache import ParquetCache
-from backtester.data.manager import DataManager
+from backtester.data.manager import DataManager, resample_ohlcv
 from tests.conftest import make_price_df, MockDataSource
 
 
@@ -287,3 +287,107 @@ class TestForwardFillEdgeCases:
                 assert len(matching) == 0, (
                     f"Date {gap_d} beyond ffill limit should be dropped"
                 )
+
+
+class TestResampleOHLCV:
+    """Tests for the resample_ohlcv function."""
+
+    def _make_daily(self, days=60):
+        """Create daily OHLCV data."""
+        dates = pd.bdate_range("2020-01-02", periods=days, freq="B")
+        rng = np.random.default_rng(42)
+        close = 100.0 + np.cumsum(rng.normal(0, 1, days))
+        close = np.maximum(close, 1.0)
+        return pd.DataFrame(
+            {
+                "Open": close * 0.999,
+                "High": close * 1.01,
+                "Low": close * 0.99,
+                "Close": close,
+                "Volume": np.full(days, 1_000_000),
+            },
+            index=pd.DatetimeIndex(dates, name="Date"),
+        )
+
+    def test_weekly_resample_basic(self):
+        """Weekly resample produces fewer rows with OHLCV columns."""
+        daily = self._make_daily(60)
+        weekly = resample_ohlcv(daily, "weekly")
+        assert len(weekly) < len(daily)
+        assert len(weekly) > 0
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            assert col in weekly.columns
+
+    def test_monthly_resample_basic(self):
+        """Monthly resample produces fewer rows."""
+        daily = self._make_daily(120)
+        monthly = resample_ohlcv(daily, "monthly")
+        assert len(monthly) < len(daily)
+        assert len(monthly) > 0
+
+    def test_invalid_timeframe_raises(self):
+        """Invalid timeframe raises ValueError."""
+        daily = self._make_daily(10)
+        with pytest.raises(ValueError, match="Unsupported timeframe"):
+            resample_ohlcv(daily, "quarterly")
+
+    def test_weekly_high_is_max(self):
+        """Weekly High should be the max of daily Highs in that week."""
+        daily = self._make_daily(10)
+        weekly = resample_ohlcv(daily, "weekly")
+        # For the first week, the High should be the max of daily Highs
+        first_week_end = weekly.index[0]
+        daily_in_week = daily.loc[daily.index <= first_week_end]
+        assert weekly["High"].iloc[0] == daily_in_week["High"].max()
+
+    def test_weekly_low_is_min(self):
+        """Weekly Low should be the min of daily Lows."""
+        daily = self._make_daily(10)
+        weekly = resample_ohlcv(daily, "weekly")
+        first_week_end = weekly.index[0]
+        daily_in_week = daily.loc[daily.index <= first_week_end]
+        assert weekly["Low"].iloc[0] == daily_in_week["Low"].min()
+
+    def test_weekly_volume_is_sum(self):
+        """Weekly Volume should be sum of daily Volumes."""
+        daily = self._make_daily(10)
+        weekly = resample_ohlcv(daily, "weekly")
+        first_week_end = weekly.index[0]
+        daily_in_week = daily.loc[daily.index <= first_week_end]
+        assert weekly["Volume"].iloc[0] == daily_in_week["Volume"].sum()
+
+    def test_index_aligns_with_trading_days(self):
+        """Resampled index values should exist in the original daily index."""
+        daily = self._make_daily(60)
+        weekly = resample_ohlcv(daily, "weekly")
+        for dt in weekly.index:
+            assert dt in daily.index, f"Resampled date {dt} not in daily index"
+
+    def test_does_not_mutate_input(self):
+        """resample_ohlcv should not mutate the input DataFrame."""
+        daily = self._make_daily(30)
+        original_len = len(daily)
+        original_cols = list(daily.columns)
+        resample_ohlcv(daily, "weekly")
+        assert len(daily) == original_len
+        assert list(daily.columns) == original_cols
+
+
+class TestCacheCoverageFallback:
+    """Test cache coverage validation in DataManager.load."""
+
+    def test_low_coverage_refetches(self):
+        """When cache covers < 90% of trading days, data is re-fetched."""
+        source = MockDataSource()
+        full_df = make_price_df(start="2020-01-02", days=252)
+        source.add("TEST", full_df)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = DataManager(cache_dir=tmpdir, source=source)
+            # Pre-populate cache with sparse data (only every 20th day)
+            sparse_df = full_df.iloc[::20]  # ~5% coverage
+            mgr._cache.save("TEST", sparse_df)
+
+            # Load should detect low coverage and re-fetch
+            result = mgr.load("TEST", date(2020, 1, 2), date(2020, 12, 31))
+            assert len(result) > 100, "Should re-fetch when cache coverage is low"

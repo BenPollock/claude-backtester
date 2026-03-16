@@ -64,15 +64,6 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 
     # Replace the period-end calendar date with the actual last trading day
     # in each period so the index aligns with daily trading dates.
-    last_trading_days = df.resample(rule).apply(lambda x: x.index[-1] if len(x) > 0 else None)
-    # last_trading_days is a Series; use the non-null entries as the new index
-    if "Close" in last_trading_days.columns:
-        # resample().apply on a DataFrame returns a DataFrame; use any column
-        new_index = last_trading_days["Close"].dropna()
-    else:
-        new_index = last_trading_days.dropna()
-
-    # Build mapping from period-end date to last trading day
     new_idx = []
     for period_end in resampled.index:
         # Find the last trading day <= period_end in the original data

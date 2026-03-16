@@ -91,6 +91,24 @@ class TestMetrics:
         sharpe_val = sharpe_ratio(equity)
         assert result > sharpe_val
 
+    def test_sortino_denominator_uses_all_returns(self):
+        """Sortino downside deviation uses N (total count), not just negative count.
+
+        The academic formula is: σ_d = sqrt(Σ min(r_i - MAR, 0)^2 / N)
+        where N is the total number of returns, not just the negative ones.
+        """
+        equity = make_equity([100, 110, 105, 115, 108, 120])
+        returns = equity.pct_change().dropna()
+        excess = returns - 0.0  # risk_free_rate = 0
+
+        # Correct downside deviation: sqrt(mean(min(excess, 0)^2)) over ALL returns
+        downside_squared = np.minimum(excess.values, 0) ** 2
+        expected_dd = np.sqrt(downside_squared.mean())
+        expected_sortino = (excess.mean() / expected_dd) * np.sqrt(252)
+
+        result = sortino_ratio(equity, risk_free_rate=0.0)
+        assert result == pytest.approx(expected_sortino, rel=1e-6)
+
     def test_sortino_no_downside_returns_inf(self):
         # Monotonically increasing — no negative returns
         equity = make_equity([100, 101, 102, 103, 104, 105])
@@ -522,3 +540,32 @@ class TestMetricsEdgeCases:
             assert result == pytest.approx(c / b, rel=1e-6)
         else:
             assert result == 0.0
+
+
+class TestInfClamping:
+    """Test that compute_all_metrics clamps inf values."""
+
+    def test_inf_clamped_to_sentinel(self):
+        """Inf values in metrics should be clamped to 99999.0."""
+        # Monotonically increasing equity: Sortino = inf, profit_factor = inf (no trades with losses)
+        equity = make_equity([100, 101, 102, 103, 104, 105])
+        trades = [
+            Trade("A", date(2020, 1, 2), date(2020, 2, 1), 100, 110, 10, 100, 0.10, 30, 0),
+        ]
+        m = compute_all_metrics(equity, trades)
+        # sortino should be clamped (all positive returns -> inf without clamping)
+        assert m["sortino_ratio"] == 99999.0
+        # profit_factor: only winners -> inf without clamping
+        assert m["profit_factor"] == 99999.0
+        # calmar_ratio: no drawdown -> inf without clamping
+        assert m["calmar_ratio"] == 99999.0
+
+    def test_no_inf_in_metrics_dict(self):
+        """No metric value should be inf after compute_all_metrics."""
+        equity = make_equity(np.linspace(100, 120, 50))
+        trades = []
+        m = compute_all_metrics(equity, trades)
+        for k, v in m.items():
+            if isinstance(v, float):
+                assert v != float("inf"), f"{k} should not be inf"
+                assert v != float("-inf"), f"{k} should not be -inf"

@@ -149,6 +149,45 @@ class TestWalkForward:
         assert "avg_is_sharpe" in result
         assert "avg_oos_sharpe" in result
 
+    @patch("backtester.research.walk_forward.BacktestEngine")
+    @patch("backtester.research.walk_forward.grid_search")
+    def test_oos_uses_optimize_metric_not_hardcoded_sharpe(self, mock_gs, MockEngine):
+        """OOS metric should use optimize_metric param, not hardcoded 'sharpe_ratio'.
+
+        Previously, walk_forward always retrieved 'sharpe_ratio' from OOS metrics
+        regardless of optimize_metric, producing incorrect degradation ratios
+        when optimizing for a different metric (e.g. CAGR).
+        """
+        # IS optimization returns best CAGR of 0.25
+        mock_gs.return_value = OptimizationResult(
+            results_table=pd.DataFrame(),
+            best_params={"sma_fast": 100},
+            best_metric_value=0.25,
+            optimize_metric="cagr",
+        )
+        # OOS result: equity that goes from 100 to 115 over 252 days (~15% return)
+        mock_result = _mock_result(cagr=0.15)
+        MockEngine.return_value.run.return_value = mock_result
+
+        config = _base_config()
+        result = walk_forward(
+            config,
+            param_grid={"sma_fast": [50, 100]},
+            is_months=24,
+            oos_months=6,
+            optimize_metric="cagr",
+        )
+
+        assert result["num_windows"] > 0
+        # OOS metric should be CAGR (from compute_all_metrics), not Sharpe
+        # The degradation ratio should be OOS_CAGR / IS_CAGR, both in same units
+        from backtester.analytics.metrics import compute_all_metrics
+        oos_equity = mock_result.equity_series
+        expected_oos_cagr = compute_all_metrics(oos_equity, [])["cagr"]
+        # Each window's oos_sharpe should actually be the OOS CAGR value
+        for w in result["windows"]:
+            assert w["oos_sharpe"] == pytest.approx(expected_oos_cagr, rel=1e-6)
+
 
 class TestAddMonths:
     def test_basic(self):

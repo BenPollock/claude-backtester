@@ -190,6 +190,77 @@ class TestPrintCalendarReport:
         assert "Drawdown Periods" in captured.out
 
 
+class TestDrawdownPeriodsOngoing:
+    """Test drawdown_periods with an ongoing (unrecovered) drawdown."""
+
+    def test_ongoing_drawdown_has_none_recovery(self):
+        """An unrecovered drawdown should have recovery=None."""
+        # Price rises then falls — never recovers
+        values = [100, 110, 105, 95, 90, 85]
+        equity = make_equity(values)
+        dp = drawdown_periods(equity)
+        assert len(dp) >= 1
+        # The last drawdown should have recovery=None since we end underwater
+        last = dp.iloc[-1]
+        assert last["recovery"] is None
+
+    def test_single_day_no_crash(self):
+        """drawdown_periods with a single-value equity should not crash."""
+        equity = make_equity([100])
+        dp = drawdown_periods(equity)
+        assert dp.empty
+
+    def test_two_values_with_decline(self):
+        """Two values: peak then decline = one drawdown period."""
+        equity = make_equity([100, 90])
+        dp = drawdown_periods(equity)
+        assert len(dp) == 1
+        assert dp.iloc[0]["depth"] == pytest.approx(-0.1, rel=1e-6)
+
+
+class TestYearlySummaryEdgeCases:
+    """Edge cases for yearly_summary."""
+
+    def test_single_year_data(self):
+        """Data within a single year should produce exactly 1 row."""
+        values = np.linspace(100, 120, 50)
+        equity = make_equity(values, start="2020-06-01")
+        ys = yearly_summary(equity)
+        assert len(ys) == 1
+        assert ys.iloc[0]["year"] == 2020
+
+    def test_sharpe_sign_matches_return(self):
+        """Positive year return should have positive Sharpe."""
+        values = np.linspace(100, 130, 252)
+        equity = make_equity(values, start="2020-01-02")
+        ys = yearly_summary(equity)
+        for _, row in ys.iterrows():
+            if row["return"] > 0:
+                assert row["sharpe"] > 0
+
+
+class TestMonthlyReturnsEdgeCases:
+    """Edge cases for monthly_returns."""
+
+    def test_flat_equity_zero_returns(self):
+        """Flat equity produces 0% monthly returns."""
+        values = [100.0] * 50
+        equity = make_equity(values, start="2020-01-02")
+        mr = monthly_returns(equity)
+        if not mr.empty:
+            month_cols = [c for c in mr.columns if c != "YTD"]
+            for c in month_cols:
+                v = mr.iloc[0].get(c)
+                if pd.notna(v):
+                    assert v == pytest.approx(0.0, abs=1e-10)
+
+    def test_empty_input_returns_empty(self):
+        """A 1-value equity series (no returns) produces empty table."""
+        equity = make_equity([100])
+        mr = monthly_returns(equity)
+        assert mr.empty
+
+
 class TestPlotMonthlyHeatmap:
     def test_does_not_raise(self):
         """plot_monthly_heatmap should not raise with Agg backend."""

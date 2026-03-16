@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 from datetime import date
 
+from backtester.strategies.base import Strategy
 from backtester.strategies.registry import get_strategy, list_strategies
 from backtester.strategies.indicators import (
     sma, rsi, macd, bollinger, stochastic, adx, obv,
@@ -238,10 +239,11 @@ class TestIndicators:
         assert t_sen.iloc[8] == pytest.approx(99.0)
         # At index 9: High max = 109, Low min = 91 => (109+91)/2 = 100.0
         assert t_sen.iloc[9] == pytest.approx(100.0)
-        # Chikou span is Close shifted forward by -26 periods (i.e., index 0
-        # gets the value from index 26). With only 20 bars, chikou at index 0
-        # should be NaN since there is no bar at index+26.
-        assert pd.isna(chikou.iloc[0])
+        # Chikou span is Close shifted backward by +26 periods (i.e., at index T
+        # it gives Close[T-26]).  With only 20 bars, the first 26 values should
+        # be NaN since there is no data 26 periods before them.  This is
+        # backward-looking to prevent lookahead bias in signal generation.
+        assert chikou.iloc[:20].isna().all()  # all 20 bars are within the 26-period warmup
 
     def test_vwap(self):
         df = make_price_df(days=50)
@@ -775,3 +777,389 @@ class TestIndicatorEdgeCases:
         assert pd.notna(result["sma_fast"].iloc[15])
         # Values after gap + window size should recover
         assert pd.notna(result["sma_fast"].iloc[30])
+
+
+# ---------------------------------------------------------------------------
+# Ichimoku backward-looking chikou span test
+# ---------------------------------------------------------------------------
+
+class TestIchimokuChikouBackwardLooking:
+    """Verify that ichimoku chikou span is backward-looking (no lookahead)."""
+
+    def test_chikou_is_backward_looking(self):
+        """Chikou span at time T should be Close[T - displacement], not future data."""
+        dates = pd.bdate_range("2020-01-02", periods=60, freq="B")
+        closes = [100.0 + i for i in range(60)]
+        df = pd.DataFrame({
+            "Open": closes,
+            "High": [c + 1 for c in closes],
+            "Low": [c - 1 for c in closes],
+            "Close": closes,
+        }, index=dates)
+        _, _, _, _, chikou = ichimoku(df, displacement=26)
+
+        # First 26 values should be NaN (no data 26 days before)
+        assert chikou.iloc[:26].isna().all()
+
+        # At index 26: chikou should be Close[0] = 100.0
+        assert chikou.iloc[26] == pytest.approx(100.0)
+
+        # At index 30: chikou should be Close[4] = 104.0
+        assert chikou.iloc[30] == pytest.approx(104.0)
+
+        # At last index (59): chikou should be Close[33] = 133.0
+        assert chikou.iloc[59] == pytest.approx(133.0)
+
+    def test_chikou_does_not_contain_future_data(self):
+        """No chikou value at row T should equal a future Close[T+k]."""
+        dates = pd.bdate_range("2020-01-02", periods=60, freq="B")
+        closes = [100.0 + i * 2 for i in range(60)]  # distinct values
+        df = pd.DataFrame({
+            "Open": closes,
+            "High": [c + 1 for c in closes],
+            "Low": [c - 1 for c in closes],
+            "Close": closes,
+        }, index=dates)
+        _, _, _, _, chikou = ichimoku(df, displacement=26)
+
+        for t in range(len(closes)):
+            val = chikou.iloc[t]
+            if pd.isna(val):
+                continue
+            # The chikou value should NOT match any future close
+            for future in range(t + 1, len(closes)):
+                assert val != closes[future], (
+                    f"Chikou at T={t} ({val}) equals future Close[{future}] ({closes[future]}) — "
+                    f"this is a lookahead bug"
+                )
+
+
+# ---------------------------------------------------------------------------
+# compute_indicators df.copy() invariant tests for all strategies
+# ---------------------------------------------------------------------------
+
+class TestComputeIndicatorsNoCopy:
+    """Verify that compute_indicators() never mutates the input DataFrame."""
+
+    def _check_no_mutation(self, strategy_name, params=None, days=50):
+        s = get_strategy(strategy_name)
+        if params:
+            s.configure(params)
+        df = make_price_df(days=days)
+        original_cols = set(df.columns)
+        original_shape = df.shape
+        s.compute_indicators(df)
+        assert set(df.columns) == original_cols, (
+            f"{strategy_name}.compute_indicators() mutated input df columns: "
+            f"added {set(df.columns) - original_cols}"
+        )
+        assert df.shape == original_shape
+
+    def test_sma_crossover_no_mutation(self):
+        self._check_no_mutation("sma_crossover", {"sma_fast": 5, "sma_slow": 10})
+
+    def test_rule_based_no_mutation(self):
+        self._check_no_mutation("rule_based", {
+            "indicators": {"rsi": {"period": 14}},
+            "buy_when": [["rsi", ">", 60]],
+            "sell_when": [],
+        })
+
+    def test_value_quality_no_mutation(self):
+        self._check_no_mutation("value_quality")
+
+    def test_earnings_growth_no_mutation(self):
+        self._check_no_mutation("earnings_growth")
+
+    def test_fundamental_screener_no_mutation(self):
+        self._check_no_mutation("fundamental_screener")
+
+    def test_insider_following_no_mutation(self):
+        self._check_no_mutation("insider_following")
+
+    def test_smart_money_no_mutation(self):
+        self._check_no_mutation("smart_money")
+
+
+# ---------------------------------------------------------------------------
+# size_order tests for SHORT and COVER
+# ---------------------------------------------------------------------------
+
+class TestSizeOrderShortCover:
+    """Verify size_order returns correct values for SHORT and COVER signals."""
+
+    def test_short_returns_negative(self):
+        """size_order for SHORT should return a negative quantity."""
+        s = get_strategy("sma_crossover")
+        row = pd.Series({"Close": 50.0, "Open": 50.0, "High": 51.0, "Low": 49.0, "Volume": 1e6})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        qty = s.size_order("TEST", SignalAction.SHORT, row, state, 0.10)
+        assert qty < 0, f"SHORT size_order should return negative, got {qty}"
+        assert qty == -200  # 10k / 50 = 200, negated
+
+    def test_cover_returns_sentinel(self):
+        """size_order for COVER should return -1 sentinel when position exists."""
+        s = get_strategy("sma_crossover")
+        row = pd.Series({"Close": 50.0, "Open": 50.0, "High": 51.0, "Low": 49.0, "Volume": 1e6})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        qty = s.size_order("TEST", SignalAction.COVER, row, state, 0.10)
+        assert qty == -1
+
+    def test_cover_no_position_returns_zero(self):
+        """size_order for COVER with no position should return 0."""
+        s = get_strategy("sma_crossover")
+        row = pd.Series({"Close": 50.0})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        qty = s.size_order("TEST", SignalAction.COVER, row, state, 0.10)
+        assert qty == 0
+
+    def test_sell_no_position_returns_zero(self):
+        """size_order for SELL with no position should return 0."""
+        s = get_strategy("sma_crossover")
+        row = pd.Series({"Close": 50.0})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        qty = s.size_order("TEST", SignalAction.SELL, row, state, 0.10)
+        assert qty == 0
+
+    def test_buy_zero_price_returns_zero(self):
+        """size_order for BUY with zero price should return 0."""
+        s = get_strategy("sma_crossover")
+        row = pd.Series({"Close": 0.0})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        qty = s.size_order("TEST", SignalAction.BUY, row, state, 0.10)
+        assert qty == 0
+
+    def test_short_zero_price_returns_zero(self):
+        """size_order for SHORT with zero price should return 0."""
+        s = get_strategy("sma_crossover")
+        row = pd.Series({"Close": 0.0})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        qty = s.size_order("TEST", SignalAction.SHORT, row, state, 0.10)
+        assert qty == 0
+
+    def test_buy_limited_by_cash(self):
+        """size_order for BUY should not exceed available cash."""
+        s = get_strategy("sma_crossover")
+        row = pd.Series({"Close": 50.0})
+        state = PortfolioState(
+            cash=5_000.0,  # only 5k cash
+            total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        # 10% of 100k = 10k target, but cash is only 5k
+        qty = s.size_order("TEST", SignalAction.BUY, row, state, 0.10)
+        assert qty == 100  # 5000 / 50 = 100
+
+
+# ---------------------------------------------------------------------------
+# Strategy auto-discovery tests
+# ---------------------------------------------------------------------------
+
+class TestStrategyAutoDiscovery:
+    """Verify that all expected strategies are auto-discovered and registered."""
+
+    def test_all_strategies_registered(self):
+        expected = [
+            "sma_crossover", "rule_based", "value_quality",
+            "earnings_growth", "fundamental_screener",
+            "insider_following", "smart_money",
+        ]
+        registered = list_strategies()
+        for name in expected:
+            assert name in registered, (
+                f"Strategy '{name}' not found in registry. "
+                f"Available: {registered}"
+            )
+
+    def test_each_strategy_instantiable(self):
+        """Each registered strategy should be instantiable without errors."""
+        for name in list_strategies():
+            s = get_strategy(name)
+            assert isinstance(s, Strategy), (
+                f"get_strategy('{name}') didn't return a Strategy instance"
+            )
+
+    def test_each_strategy_has_required_methods(self):
+        """Each strategy should have the required ABC methods."""
+        for name in list_strategies():
+            s = get_strategy(name)
+            assert hasattr(s, "compute_indicators")
+            assert hasattr(s, "generate_signals")
+            assert hasattr(s, "configure")
+            assert hasattr(s, "size_order")
+
+
+# ---------------------------------------------------------------------------
+# CrossSectionalStrategy helper tests
+# ---------------------------------------------------------------------------
+
+class TestCrossSectionalHelpers:
+    """Test the static helper methods on CrossSectionalStrategy."""
+
+    def test_top_n(self):
+        from backtester.strategies.base import CrossSectionalStrategy
+        scores = {"A": 10, "B": 30, "C": 20, "D": 5}
+        result = CrossSectionalStrategy.top_n(scores, 2)
+        assert result == ["B", "C"]
+
+    def test_bottom_n(self):
+        from backtester.strategies.base import CrossSectionalStrategy
+        scores = {"A": 10, "B": 30, "C": 20, "D": 5}
+        result = CrossSectionalStrategy.bottom_n(scores, 2)
+        assert result == ["D", "A"]
+
+    def test_top_n_more_than_available(self):
+        from backtester.strategies.base import CrossSectionalStrategy
+        scores = {"A": 10, "B": 20}
+        result = CrossSectionalStrategy.top_n(scores, 5)
+        assert len(result) == 2
+
+    def test_bottom_n_empty(self):
+        from backtester.strategies.base import CrossSectionalStrategy
+        scores = {}
+        result = CrossSectionalStrategy.bottom_n(scores, 3)
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Rule-based edge case tests
+# ---------------------------------------------------------------------------
+
+class TestRuleBasedEdgeCases:
+    """Test edge cases in the rule-based strategy."""
+
+    def test_no_rules_means_hold(self):
+        """With no buy or sell rules, strategy always HOLDs."""
+        s = get_strategy("rule_based")
+        s.configure({"indicators": {}, "buy_when": [], "sell_when": []})
+        row = pd.Series({"Close": 100.0})
+        signal = s.generate_signals("TEST", row, None, _make_state())
+        assert signal == SignalAction.HOLD
+
+    def test_no_buy_rules_no_sell_rules_with_position(self):
+        """With no sell rules and a position, should HOLD."""
+        s = get_strategy("rule_based")
+        s.configure({"indicators": {}, "buy_when": [], "sell_when": []})
+        pos = Position(symbol="TEST")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+        row = pd.Series({"Close": 90.0})
+        state = _make_state(num_positions=1, symbols=frozenset({"TEST"}))
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.HOLD
+
+    def test_rule_with_missing_column(self):
+        """When a rule references a missing column, it should evaluate to False (HOLD)."""
+        s = get_strategy("rule_based")
+        s.configure({
+            "indicators": {},
+            "buy_when": [["nonexistent_col", ">", 0]],
+            "sell_when": [],
+        })
+        row = pd.Series({"Close": 100.0})
+        signal = s.generate_signals("TEST", row, None, _make_state())
+        assert signal == SignalAction.HOLD
+
+    def test_rule_with_nan_value(self):
+        """When a referenced column is NaN, rule should evaluate to False."""
+        s = get_strategy("rule_based")
+        s.configure({
+            "indicators": {},
+            "buy_when": [["rsi", ">", 50]],
+            "sell_when": [],
+        })
+        row = pd.Series({"Close": 100.0, "rsi": float("nan")})
+        signal = s.generate_signals("TEST", row, None, _make_state())
+        assert signal == SignalAction.HOLD
+
+    def test_ichimoku_indicator_expands_in_rule_based(self):
+        """Ichimoku through rule_based should create all expected columns."""
+        s = get_strategy("rule_based")
+        s.configure({
+            "indicators": {"ichi": {"fn": "ichimoku", "tenkan": 9, "kijun": 26}},
+            "buy_when": [],
+            "sell_when": [],
+        })
+        df = make_price_df(days=100)
+        result = s.compute_indicators(df)
+        assert "ichi_tenkan" in result.columns
+        assert "ichi_kijun" in result.columns
+        assert "ichi_senkou_a" in result.columns
+        assert "ichi_senkou_b" in result.columns
+        assert "ichi_chikou" in result.columns
+
+
+class TestSmartMoneyThreshold:
+    """Verify SmartMoney inst_growth_threshold boundary behavior."""
+
+    def _make_row(self, inst_change, close=120.0, sma_trend=100.0):
+        """Create a row with all required SmartMoney columns."""
+        return pd.Series({
+            "Close": close,
+            "sma_trend": sma_trend,
+            "inst_shares_change_pct": inst_change,
+            "fund_net_income": 1_000_000.0,
+            "fund_revenue_growth_yoy": 0.10,
+            "insider_buy_ratio_90d": 0.8,
+            "insider_net_shares_30d": 500,
+        })
+
+    def test_exact_threshold_triggers_buy(self):
+        """inst_change exactly at threshold should trigger BUY, not HOLD.
+
+        The docstring says 'Min QoQ institutional share increase (default 0.05 = 5%)',
+        so the minimum value (5%) should pass the filter. Previously used `<=`
+        which rejected the exact boundary value.
+        """
+        s = get_strategy("smart_money")
+        s.configure({"sma_period": 50, "inst_growth_threshold": 0.05})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(inst_change=0.05)  # exactly at threshold
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY, (
+            "inst_change at exactly the threshold should trigger BUY"
+        )
+
+    def test_below_threshold_holds(self):
+        """inst_change below threshold should HOLD."""
+        s = get_strategy("smart_money")
+        s.configure({"sma_period": 50, "inst_growth_threshold": 0.05})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(inst_change=0.04)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_above_threshold_buys(self):
+        """inst_change above threshold should BUY."""
+        s = get_strategy("smart_money")
+        s.configure({"sma_period": 50, "inst_growth_threshold": 0.05})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(inst_change=0.10)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY

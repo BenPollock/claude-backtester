@@ -38,10 +38,10 @@ def sortino_ratio(equity_series: pd.Series, risk_free_rate: float = 0.0) -> floa
     if len(returns) < 2:
         return 0.0
     excess = returns - risk_free_rate / 252.0
-    downside = excess[excess < 0]
-    if len(downside) == 0:
+    downside_squared = np.minimum(excess, 0) ** 2
+    if downside_squared.sum() == 0:
         return float("inf")
-    downside_std = np.sqrt((downside ** 2).mean())
+    downside_std = np.sqrt(downside_squared.mean())
     if downside_std == 0:
         return float("inf")
     return (excess.mean() / downside_std) * np.sqrt(252)

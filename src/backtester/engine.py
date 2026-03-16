@@ -537,9 +537,18 @@ class BacktestEngine:
             if vol_scale != 1.0:
                 qty = int(qty * vol_scale)
         elif signal == SignalAction.SHORT:
-            qty = strategy.size_order(
-                symbol, signal, row, portfolio_state, config.max_alloc_pct
+            # Use the same PositionSizer as BUY for consistent sizing,
+            # then negate to indicate short direction
+            qty = self._sizer.compute(
+                symbol, row["Close"], row,
+                portfolio_state.total_equity,
+                portfolio_state.cash,
+                config.max_alloc_pct,
             )
+            qty = -qty  # negative indicates short
+            # Gap 20: Apply vol scale to shorts too
+            if vol_scale != 1.0:
+                qty = -int(abs(qty) * vol_scale)
         else:
             qty = strategy.size_order(
                 symbol, signal, row, portfolio_state, config.max_alloc_pct

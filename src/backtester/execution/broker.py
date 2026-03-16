@@ -204,6 +204,40 @@ class SimulatedBroker:
                     continue
                 quantity = abs(pos.total_quantity)
 
+            # Reject zero-quantity orders (bad input or empty position)
+            if quantity <= 0:
+                order.status = OrderStatus.CANCELLED
+                logger.debug(f"Cancelled {order.symbol} order: resolved quantity is 0")
+                continue
+
+            # Clamp sell/cover quantity to actual position size to prevent
+            # ValueError in sell_lots_fifo/close_lots_fifo
+            is_short_entry = order.reason == "short_entry"
+            is_cover = order.reason == "cover"
+            if order.side == Side.SELL and not is_short_entry:
+                pos = portfolio.get_position(order.symbol)
+                if pos is not None and not pos.is_short:
+                    available = pos.total_quantity
+                    if quantity > available:
+                        logger.debug(
+                            f"Clamped SELL qty for {order.symbol} from {quantity} "
+                            f"to {available} (position size)"
+                        )
+                        quantity = available
+                    if quantity <= 0:
+                        order.status = OrderStatus.CANCELLED
+                        continue
+            elif order.side == Side.BUY and is_cover:
+                pos = portfolio.get_position(order.symbol)
+                if pos is not None and pos.is_short:
+                    abs_held = abs(pos.total_quantity)
+                    if quantity > abs_held:
+                        logger.debug(
+                            f"Clamped COVER qty for {order.symbol} from {quantity} "
+                            f"to {abs_held} (short position size)"
+                        )
+                        quantity = abs_held
+
             # Gap 3: Volume-constrained partial fills
             if volume > 0 and self._max_volume_pct > 0:
                 max_fillable = int(volume * self._max_volume_pct)
@@ -269,11 +303,7 @@ class SimulatedBroker:
                 slippage=slippage_amount,
             )
 
-            # Determine if this is a short-related order via the reason field
-            is_short_entry = order.reason == "short_entry"
-            is_cover = order.reason == "cover"
-
-            # Update portfolio
+            # Update portfolio (is_short_entry/is_cover determined before volume clamp)
             if order.side == Side.BUY and not is_cover:
                 # Normal long buy
                 pos = portfolio.open_position(order.symbol)
@@ -289,7 +319,16 @@ class SimulatedBroker:
             elif order.side == Side.BUY and is_cover:
                 # Cover a short position (buy back borrowed shares)
                 pos = portfolio.get_position(order.symbol)
-                if pos is not None and pos.is_short:
+                if pos is None or not pos.is_short:
+                    # No short position to cover (already closed or never existed).
+                    # Cancel to prevent phantom fills with no portfolio mutation.
+                    order.status = OrderStatus.CANCELLED
+                    logger.debug(
+                        f"Cancelled COVER for {order.symbol}: "
+                        f"{'no position' if pos is None else 'position is not short'}"
+                    )
+                    continue
+                else:
                     avg_cost = pos.avg_entry_price
                     trades = pos.close_lots_fifo(quantity, fill_price, current_date, commission)
                     portfolio.trade_log.extend(trades)

@@ -312,15 +312,16 @@ class TestMetricsZeroTrades:
 # ===========================================================================
 
 class TestUnrealizedPnlZeroPrice:
-    """Position with market_price=0 should return 0 unrealized PnL."""
+    """Position with market_price=0 should report actual PnL, not mask it."""
 
     def test_unrealized_pnl_zero_market_price(self):
         pos = Position(symbol="TEST")
         pos.add_lot(100, 50.0, date(2020, 1, 2))
-        # _market_price defaults to 0.0
-        assert pos.unrealized_pnl == 0.0
+        # _market_price defaults to 0.0; PnL = (0 - 50) * 100 = -5000
+        assert pos.unrealized_pnl == -5000.0
 
     def test_unrealized_pnl_short_zero_market_price(self):
         pos = Position(symbol="TEST")
         pos.add_lot(-100, 50.0, date(2020, 1, 2))
-        assert pos.unrealized_pnl == 0.0
+        # Short PnL = (50 - 0) * 100 = 5000
+        assert pos.unrealized_pnl == 5000.0

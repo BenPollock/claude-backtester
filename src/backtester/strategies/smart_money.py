@@ -90,7 +90,7 @@ class SmartMoney(Strategy):
 
         if not has_position:
             # Institutional accumulation
-            if inst_change <= self.inst_growth_threshold:
+            if inst_change < self.inst_growth_threshold:
                 return SignalAction.HOLD
 
             # Insider confirmation (if required)

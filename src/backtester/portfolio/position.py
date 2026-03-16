@@ -97,7 +97,7 @@ class Position:
         Short: (avg_entry - market_price) * abs(quantity)
         """
         qty = self.total_quantity
-        if qty == 0 or self._market_price == 0:
+        if qty == 0:
             return 0.0
         if qty > 0:
             return (self._market_price - self.avg_entry_price) * qty
@@ -306,7 +306,7 @@ class Position:
 
             # Short PnL: profit when price falls
             pnl = (lot.entry_price - exit_price) * cover_qty - total_fees
-            pnl_pct = (lot.entry_price / exit_price - 1.0) if exit_price > 0 else 0.0
+            pnl_pct = (lot.entry_price / exit_price - 1.0) if exit_price > 0 else _NAN
 
             trades.append(Trade(
                 symbol=self.symbol,

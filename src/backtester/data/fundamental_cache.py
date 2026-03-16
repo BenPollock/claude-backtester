@@ -86,7 +86,7 @@ class EdgarCache:
         - financials: (metric, period_end)
         - insider: (filed_date, insider_name, shares)
         - institutional: (report_date,)
-        - events: (filed_date, items)
+        - events: (filed_date, event_date)
         """
         existing = self.load(symbol)
         if existing is not None and not existing.empty:

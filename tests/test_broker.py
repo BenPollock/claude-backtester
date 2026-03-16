@@ -3,6 +3,7 @@
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from backtester.execution.broker import SimulatedBroker
 from backtester.execution.slippage import FixedSlippage
@@ -522,3 +523,513 @@ class TestBrokerEdgeCases:
         assert len(fills) == 0, "SELL on short position should produce no fills"
         assert order.status == OrderStatus.CANCELLED
         assert portfolio.positions["AAPL"].total_quantity == -100
+
+
+class TestBrokerBugFixes:
+    """Tests for specific bugs found during code review."""
+
+    def test_sell_quantity_exceeds_position_clamped(self):
+        """SELL with explicit qty > position size should be clamped, not crash.
+
+        Previously, sell_lots_fifo would raise ValueError when qty > held.
+        The broker now clamps the sell quantity to the actual position size.
+        """
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=85_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 150.0, date(2020, 1, 2))
+
+        # Try to sell 200 shares but only hold 100
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=200,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=160.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        # Should sell all 100 (clamped), not crash
+        assert len(fills) == 1
+        assert fills[0].quantity == 100
+        assert fills[0].price == 160.0
+        assert not portfolio.has_position("AAPL")
+        assert portfolio.cash == 85_000.0 + 16_000.0
+
+    def test_cover_quantity_exceeds_short_position_clamped(self):
+        """COVER with explicit qty > short position size should be clamped, not crash.
+
+        Previously, close_lots_fifo would raise ValueError when qty > abs(held).
+        The broker now clamps the cover quantity to the actual short position size.
+        """
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-50, 150.0, date(2020, 1, 2))  # short 50 shares
+
+        # Try to cover 200 shares but only short 50
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=200,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=140.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        # Should cover all 50 (clamped), not crash
+        assert len(fills) == 1
+        assert fills[0].quantity == 50
+        assert fills[0].price == 140.0
+        assert not portfolio.has_position("AAPL")
+        # Cash decreases: 100k - (140 * 50) = 100k - 7k = 93k
+        assert portfolio.cash == 100_000.0 - 7_000.0
+
+    def test_zero_quantity_buy_cancelled(self):
+        """BUY with quantity=0 should be cancelled, not produce a phantom fill."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=0,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=100.0)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.CANCELLED
+        assert not portfolio.has_position("AAPL")
+        assert portfolio.cash == 100_000.0
+
+    def test_zero_quantity_sell_cancelled(self):
+        """SELL with quantity=0 should be cancelled."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=0,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=160.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.CANCELLED
+        # Position unchanged
+        assert portfolio.positions["AAPL"].total_quantity == 100
+
+    def test_phantom_cover_cancelled_when_position_already_closed(self):
+        """Two cover orders for the same short: first covers fully, second must cancel.
+
+        Previously, the cover path lacked an else clause, so the second cover
+        fell through to OrderStatus.FILLED, creating a phantom fill with no
+        portfolio mutation (cash unchanged, no position update).
+        """
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-50, 150.0, date(2020, 1, 2))  # short 50 shares
+
+        # Submit two cover orders for the same position
+        cover1 = Order(symbol="AAPL", side=Side.BUY, quantity=50,
+                       order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                       reason="cover")
+        cover2 = Order(symbol="AAPL", side=Side.BUY, quantity=50,
+                       order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                       reason="cover")
+        broker.submit_order(cover1)
+        broker.submit_order(cover2)
+
+        market_data = {"AAPL": make_row(open_price=140.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        # First cover should fill, second should be cancelled
+        assert len(fills) == 1
+        assert fills[0].quantity == 50
+        assert cover1.status == OrderStatus.FILLED
+        assert cover2.status == OrderStatus.CANCELLED
+        # Position fully closed
+        assert not portfolio.has_position("AAPL")
+        # Cash: only one cover deduction (140 * 50 = 7000)
+        assert portfolio.cash == 100_000.0 - 7_000.0
+
+
+class TestBrokerShortOrders:
+    """Tests for short entry and cover order handling in the broker."""
+
+    def test_short_entry_creates_short_position(self):
+        """SELL with reason='short_entry' should create a short position."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=100,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2),
+                      reason="short_entry")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=150.0)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].quantity == 100
+        assert fills[0].price == 150.0
+        assert portfolio.has_position("AAPL")
+        assert portfolio.positions["AAPL"].total_quantity == -100
+        # Cash increases by sale proceeds
+        assert portfolio.cash == 100_000.0 + 15_000.0
+
+    def test_cover_closes_short_position(self):
+        """BUY with reason='cover' should close a short position."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=115_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-100, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=100,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=140.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].quantity == 100
+        assert fills[0].price == 140.0
+        assert not portfolio.has_position("AAPL")
+        # Cash decreases by cover cost
+        assert portfolio.cash == 115_000.0 - 14_000.0
+        # Should have trade log entries
+        assert len(portfolio.trade_log) == 1
+        # Short PnL: (entry - exit) * qty = (150 - 140) * 100 = 1000
+        assert portfolio.trade_log[0].pnl == 1_000.0
+
+    def test_cover_sentinel_resolves_quantity(self):
+        """BUY with qty=-1 and reason='cover' should resolve to short position size."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=115_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-75, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=-1,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=140.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].quantity == 75  # resolved from sentinel
+        assert not portfolio.has_position("AAPL")
+
+
+class TestBrokerStopOrders:
+    """Tests for standalone STOP and STOP_LIMIT order types."""
+
+    def test_stop_sell_triggers_when_low_hits_stop(self):
+        """STOP SELL should trigger when Low <= stop_price."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=50_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=-1,
+                      order_type=OrderType.STOP, stop_price=96.0,
+                      signal_date=date(2020, 1, 3), time_in_force="GTC")
+        broker.submit_order(order)
+
+        # Low=95 triggers stop at 96
+        row = pd.Series({"Open": 99.0, "High": 101.0, "Low": 95.0,
+                         "Close": 97.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 6), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].price == 96.0  # fills at stop price
+        assert fills[0].quantity == 100
+        assert not portfolio.has_position("AAPL")
+
+    def test_stop_sell_does_not_trigger_above_stop(self):
+        """STOP SELL should not trigger when Low > stop_price."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=50_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=-1,
+                      order_type=OrderType.STOP, stop_price=90.0,
+                      signal_date=date(2020, 1, 3), time_in_force="GTC")
+        broker.submit_order(order)
+
+        row = pd.Series({"Open": 99.0, "High": 105.0, "Low": 95.0,
+                         "Close": 100.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 6), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 0
+        assert len(broker.pending_orders) == 1  # GTC keeps it pending
+
+    def test_stop_buy_triggers_when_high_hits_stop(self):
+        """STOP BUY should trigger when High >= stop_price."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=50,
+                      order_type=OrderType.STOP, stop_price=110.0,
+                      signal_date=date(2020, 1, 3), time_in_force="GTC")
+        broker.submit_order(order)
+
+        # High=112 triggers stop at 110
+        row = pd.Series({"Open": 105.0, "High": 112.0, "Low": 103.0,
+                         "Close": 108.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 6), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].price == 110.0
+        assert fills[0].quantity == 50
+        assert portfolio.positions["AAPL"].total_quantity == 50
+
+    def test_stop_limit_sell_triggers_and_fills(self):
+        """STOP_LIMIT SELL: stop triggers, then limit reached -> fills at limit price."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=50_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+
+        # Stop at 95, limit at 94
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=-1,
+                      order_type=OrderType.STOP_LIMIT, stop_price=95.0,
+                      limit_price=94.0,
+                      signal_date=date(2020, 1, 3), time_in_force="GTC")
+        broker.submit_order(order)
+
+        # Low=93 triggers stop (<=95) and high=99 reaches limit sell (>=94)
+        row = pd.Series({"Open": 97.0, "High": 99.0, "Low": 93.0,
+                         "Close": 95.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 6), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].price == 94.0  # fills at limit price
+        assert not portfolio.has_position("AAPL")
+
+    def test_stop_limit_stop_triggers_but_limit_not_reached(self):
+        """STOP_LIMIT: stop triggers but limit not reachable -> no fill."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=50_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+
+        # Stop at 95, limit at 96 (sell limit: needs High >= 96)
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=-1,
+                      order_type=OrderType.STOP_LIMIT, stop_price=95.0,
+                      limit_price=96.0,
+                      signal_date=date(2020, 1, 3), time_in_force="GTC")
+        broker.submit_order(order)
+
+        # Low=93 triggers stop, but High=94 doesn't reach limit sell at 96
+        row = pd.Series({"Open": 94.0, "High": 94.0, "Low": 93.0,
+                         "Close": 93.5, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 6), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 0
+        assert len(broker.pending_orders) == 1  # GTC keeps it
+
+
+class TestBrokerFillPriceModels:
+    """Tests for different fill_price_model settings."""
+
+    def test_close_fill_price_model(self):
+        """fill_price_model='close' should fill at Close price."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+            fill_price_model="close",
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        row = pd.Series({"Open": 100.0, "High": 110.0, "Low": 90.0,
+                         "Close": 105.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 3), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].price == 105.0
+
+    def test_vwap_fill_price_model(self):
+        """fill_price_model='vwap' should fill at (H+L+C)/3."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+            fill_price_model="vwap",
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        row = pd.Series({"Open": 100.0, "High": 110.0, "Low": 90.0,
+                         "Close": 105.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 3), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        expected_vwap = (110.0 + 90.0 + 105.0) / 3.0
+        assert fills[0].price == pytest.approx(expected_vwap)
+
+    def test_default_fill_price_model_is_open(self):
+        """Default fill_price_model should use Open price."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        row = pd.Series({"Open": 100.0, "High": 110.0, "Low": 90.0,
+                         "Close": 105.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 3), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].price == 100.0
+
+
+class TestBrokerPartialFillRequeue:
+    """Tests for partial fill with requeue policy."""
+
+    def test_partial_fill_requeue_creates_remainder(self):
+        """With requeue policy, unfilled portion should be requeued as GTC order."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+            max_volume_pct=0.10,
+            partial_fill_policy="requeue",
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=500,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        # volume=1000, 10% = 100 max fillable; remainder = 400
+        market_data = {"AAPL": make_row(open_price=10.0, volume=1_000)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].quantity == 100
+        # Remainder should be requeued as pending GTC order
+        assert len(broker.pending_orders) == 1
+        remainder = broker.pending_orders[0]
+        assert remainder.quantity == 400
+        assert remainder.time_in_force == "GTC"
+        assert remainder.expiry_date is not None
+
+    def test_partial_fill_cancel_no_remainder(self):
+        """With cancel policy (default), no remainder is requeued."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+            max_volume_pct=0.10,
+            partial_fill_policy="cancel",
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=500,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=10.0, volume=1_000)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].quantity == 100
+        # No remainder requeued
+        assert len(broker.pending_orders) == 0
+
+
+class TestBrokerGTCExpiry:
+    """Tests for GTC order expiry behavior."""
+
+    def test_gtc_order_expires_on_expiry_date(self):
+        """A GTC order with explicit expiry_date should be cancelled on that date."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                      order_type=OrderType.LIMIT, limit_price=80.0,
+                      signal_date=date(2020, 1, 2), time_in_force="GTC",
+                      expiry_date=date(2020, 1, 6))
+        broker.submit_order(order)
+
+        # Day 1: price too high, order pending
+        row = pd.Series({"Open": 100.0, "High": 105.0, "Low": 95.0,
+                         "Close": 100.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 3), {"AAPL": row}, portfolio)
+        assert len(fills) == 0
+        assert len(broker.pending_orders) == 1
+
+        # Day 2: still too high, at/past expiry date -> cancelled
+        fills2 = broker.process_fills(date(2020, 1, 6), {"AAPL": row}, portfolio)
+        assert len(fills2) == 0
+        assert order.status == OrderStatus.CANCELLED
+        assert len(broker.pending_orders) == 0
+
+    def test_gtc_order_fills_before_expiry(self):
+        """A GTC order should fill if reached before expiry_date."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                      order_type=OrderType.LIMIT, limit_price=90.0,
+                      signal_date=date(2020, 1, 2), time_in_force="GTC",
+                      expiry_date=date(2020, 1, 10))
+        broker.submit_order(order)
+
+        # Price drops to reach limit before expiry
+        row = pd.Series({"Open": 92.0, "High": 93.0, "Low": 88.0,
+                         "Close": 90.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 6), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        assert fills[0].price == 90.0
+        assert order.status == OrderStatus.FILLED

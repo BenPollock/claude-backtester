@@ -98,7 +98,7 @@ def walk_forward(
             oos_equity = oos_result.equity_series
             oos_trades = oos_result.trades
             oos_metrics = compute_all_metrics(oos_equity, oos_trades)
-            oos_sharpe = oos_metrics.get("sharpe_ratio", 0.0)
+            oos_sharpe = oos_metrics.get(optimize_metric, 0.0)
         except Exception as e:
             logger.warning(f"  OOS test failed: {e}")
             oos_metrics = {}
