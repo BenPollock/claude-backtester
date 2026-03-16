@@ -829,3 +829,195 @@ class TestMultipleStrategiesSameData:
         assert result2.equity_series is not None
         # They should not necessarily produce identical results
         # (different strategies = different signals)
+
+
+# ---------------------------------------------------------------------------
+# E2E tests for rate limiting / max_filings config changes
+# ---------------------------------------------------------------------------
+
+
+class TestEdgarMaxFilingsE2E:
+    """E2E tests verifying that edgar_max_filings config works through the pipeline."""
+
+    def test_pipeline_runs_with_custom_max_filings(self):
+        """Backtest completes successfully with a custom edgar_max_filings value."""
+        prices = [80 + i * 0.17 for i in range(300)]
+        daily = make_controlled_df(prices, start="2020-01-02")
+        fin = _make_good_financials()
+        enriched = _enrich_with_financials(daily, fin)
+
+        source = MockDataSource()
+        source.add("TEST", enriched)
+        start, end = _dates_from_df(enriched)
+
+        config = BacktestConfig(
+            strategy_name="value_quality",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start,
+            end_date=end,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.50,
+            strategy_params={"sma_period": 50, "max_pe": 30.0, "min_pe": 1.0},
+            edgar_max_filings=25,
+        )
+        result = _run_backtest(config, source)
+        assert result.equity_series is not None
+        assert len(result.trades) > 0
+
+    def test_default_max_filings_in_config(self):
+        """Config has default edgar_max_filings=50 and pipeline works."""
+        prices = [100] * 100
+        daily = make_controlled_df(prices, start="2020-01-02")
+
+        source = MockDataSource()
+        source.add("TEST", daily)
+        start, end = _dates_from_df(daily)
+
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start,
+            end_date=end,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.50,
+            strategy_params={"sma_fast": 10, "sma_slow": 30},
+        )
+        assert config.edgar_max_filings == 50
+        result = _run_backtest(config, source)
+        assert result.equity_series is not None
+
+
+class TestRetryGracefulDegradationE2E:
+    """E2E tests verifying that EDGAR source failures degrade gracefully."""
+
+    def test_value_quality_returns_hold_on_source_failure(self):
+        """value_quality produces no trades when source returns empty (simulating rate limit failure)."""
+        prices = [80 + i * 0.17 for i in range(300)]
+        daily = make_controlled_df(prices, start="2020-01-02")
+
+        # No EDGAR enrichment — simulates source failure returning empty data
+        source = MockDataSource()
+        source.add("TEST", daily)
+        start, end = _dates_from_df(daily)
+
+        config = BacktestConfig(
+            strategy_name="value_quality",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start,
+            end_date=end,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.50,
+            strategy_params={"sma_period": 50},
+        )
+        result = _run_backtest(config, source)
+        # Without EDGAR data, value_quality should return HOLD (no trades)
+        assert len(result.trades) == 0
+        # But it shouldn't crash
+        assert result.equity_series is not None
+
+    def test_insider_following_returns_hold_without_data(self):
+        """insider_following produces no trades without insider data."""
+        prices = [80 + i * 0.3 for i in range(150)]
+        daily = make_controlled_df(prices, start="2020-01-02")
+
+        source = MockDataSource()
+        source.add("TEST", daily)
+        start, end = _dates_from_df(daily)
+
+        config = BacktestConfig(
+            strategy_name="insider_following",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start,
+            end_date=end,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.50,
+            strategy_params={"sma_period": 20},
+        )
+        result = _run_backtest(config, source)
+        assert len(result.trades) == 0
+        assert result.equity_series is not None
+
+    def test_smart_money_returns_hold_without_any_edgar(self):
+        """smart_money with no EDGAR data produces no trades."""
+        prices = [80 + i * 0.2 for i in range(150)]
+        daily = make_controlled_df(prices, start="2020-01-02")
+
+        source = MockDataSource()
+        source.add("TEST", daily)
+        start, end = _dates_from_df(daily)
+
+        config = BacktestConfig(
+            strategy_name="smart_money",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start,
+            end_date=end,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.50,
+            strategy_params={"sma_period": 50},
+        )
+        result = _run_backtest(config, source)
+        assert len(result.trades) == 0
+        assert result.equity_series is not None
+
+    def test_earnings_growth_returns_hold_without_edgar(self):
+        """earnings_growth with no EDGAR data produces no trades."""
+        prices = [80 + i * 0.17 for i in range(100)]
+        daily = make_controlled_df(prices, start="2020-01-02")
+
+        source = MockDataSource()
+        source.add("TEST", daily)
+        start, end = _dates_from_df(daily)
+
+        config = BacktestConfig(
+            strategy_name="earnings_growth",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start,
+            end_date=end,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.50,
+            strategy_params={"sma_period": 20},
+        )
+        result = _run_backtest(config, source)
+        assert len(result.trades) == 0
+        assert result.equity_series is not None
+
+    def test_fundamental_screener_returns_hold_without_edgar(self):
+        """fundamental_screener with fund_ rules but no data produces no trades."""
+        prices = [80 + i * 0.17 for i in range(100)]
+        daily = make_controlled_df(prices, start="2020-01-02")
+
+        source = MockDataSource()
+        source.add("TEST", daily)
+        start, end = _dates_from_df(daily)
+
+        config = BacktestConfig(
+            strategy_name="fundamental_screener",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start,
+            end_date=end,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.50,
+            strategy_params={
+                "sma_period": 20,
+                "buy_rules": [["fund_net_income", ">", 0]],
+                "sell_rules": [],
+            },
+        )
+        result = _run_backtest(config, source)
+        # fund_net_income column won't exist -> rule evaluates False -> no trades
+        assert len(result.trades) == 0
+        assert result.equity_series is not None

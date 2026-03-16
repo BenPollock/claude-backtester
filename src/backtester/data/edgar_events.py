@@ -1,10 +1,11 @@
 """SEC EDGAR 8-K material event data via edgartools."""
 
 import logging
-import time
 from datetime import date
 
 import pandas as pd
+
+from backtester.data.edgar_utils import edgar_retry
 
 logger = logging.getLogger(__name__)
 
@@ -53,22 +54,26 @@ class EdgarEventSource:
         has_material_agreement, has_delisting_notice, has_bankruptcy
     """
 
-    def __init__(self, user_agent: str) -> None:
+    def __init__(self, user_agent: str, max_filings: int = 50) -> None:
         if Company is None:
             raise ImportError(
                 "edgartools is required for EDGAR event data. "
                 "Install it with: pip install edgartools"
             )
         self.user_agent = user_agent
+        self.max_filings = max_filings
 
+    @edgar_retry()
     def fetch(self, symbol: str) -> pd.DataFrame:
         """Fetch 8-K events for *symbol*."""
         company = Company(symbol)
-        time.sleep(0.1)
 
         try:
             filings = company.get_filings(form="8-K")
-        except Exception:
+        except Exception as exc:
+            from backtester.data.edgar_utils import _is_rate_limit_error
+            if _is_rate_limit_error(exc):
+                raise
             logger.warning("Could not retrieve 8-K filings for %s", symbol)
             return self._empty_df()
 
@@ -76,8 +81,7 @@ class EdgarEventSource:
             return self._empty_df()
 
         rows: list[dict] = []
-        for filing in filings:
-            time.sleep(0.1)
+        for filing in filings[:self.max_filings]:
             try:
                 filed_date = self._parse_date(
                     getattr(filing, "filing_date", None)

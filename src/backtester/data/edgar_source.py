@@ -1,10 +1,11 @@
 """SEC EDGAR financial statement data via edgartools (10-K/10-Q XBRL)."""
 
 import logging
-import time
 from datetime import date
 
 import pandas as pd
+
+from backtester.data.edgar_utils import edgar_retry
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class EdgarFundamentalSource:
         self.user_agent = user_agent
         set_identity(user_agent)
 
+    @edgar_retry()
     def fetch(self, symbol: str) -> pd.DataFrame:
         """Fetch financial statement data for *symbol* from EDGAR.
 
@@ -74,20 +76,32 @@ class EdgarFundamentalSource:
             value (float), form (str)
         """
         company = Company(symbol)
-        time.sleep(0.1)  # SEC rate-limit courtesy
 
         try:
             facts = company.get_facts()
-        except Exception:
+        except Exception as exc:
+            from backtester.data.edgar_utils import _is_rate_limit_error
+            if _is_rate_limit_error(exc):
+                raise  # let retry decorator handle it
             logger.warning("Could not retrieve XBRL facts for %s", symbol)
             return self._empty_df()
 
         if facts is None:
             return self._empty_df()
 
+        # Export all facts with metadata (filing_date, form_type)
+        try:
+            all_facts_df = facts.to_dataframe(include_metadata=True)
+        except Exception:
+            logger.warning("Could not export facts to DataFrame for %s", symbol)
+            return self._empty_df()
+
+        if all_facts_df.empty:
+            return self._empty_df()
+
         rows: list[dict] = []
         for metric, tags in TAG_MAP.items():
-            resolved = self._resolve_tag(facts, metric, tags)
+            resolved = self._resolve_tag(all_facts_df, metric, tags)
             rows.extend(resolved)
 
         if not rows:
@@ -110,25 +124,28 @@ class EdgarFundamentalSource:
 
     @staticmethod
     def _resolve_tag(
-        facts: object, metric: str, tags: list[str]
+        all_facts_df: pd.DataFrame, metric: str, tags: list[str]
     ) -> list[dict]:
         """Try XBRL tags in order; return records from first tag with data."""
         for tag in tags:
             try:
-                # edgartools facts lookup — API may vary across versions
-                concept = facts.get(tag)
-                if concept is None or concept.empty:
+                # Match concept with or without namespace prefix (e.g., us-gaap:)
+                concept_df = all_facts_df[
+                    (all_facts_df["concept"] == tag)
+                    | (all_facts_df["concept"] == f"us-gaap:{tag}")
+                ]
+                if concept_df.empty:
                     continue
 
                 records: list[dict] = []
-                for _, row in concept.iterrows():
+                for _, row in concept_df.iterrows():
                     try:
-                        period_end = (
-                            row.get("end") or row.get("period_end") or row.get("period")
-                        )
-                        filed = row.get("filed") or row.get("filed_date")
-                        val = row.get("val") or row.get("value")
-                        form = row.get("form", "")
+                        period_end = row.get("period_end")
+                        filed = row.get("filing_date")
+                        val = row.get("numeric_value")
+                        if val is None:
+                            val = row.get("value")
+                        form = row.get("form_type", "")
 
                         if period_end is None or val is None:
                             continue
@@ -138,12 +155,17 @@ class EdgarFundamentalSource:
                         if isinstance(filed, str):
                             filed = date.fromisoformat(filed)
 
+                        try:
+                            val_float = float(val)
+                        except (ValueError, TypeError):
+                            continue
+
                         records.append(
                             {
                                 "metric": metric,
                                 "period_end": period_end,
                                 "filed_date": filed,
-                                "value": float(val),
+                                "value": val_float,
                                 "form": str(form),
                             }
                         )

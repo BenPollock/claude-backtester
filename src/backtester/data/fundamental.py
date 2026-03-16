@@ -125,6 +125,7 @@ class EdgarDataManager:
         enable_insider: bool = True,
         enable_institutional: bool = False,
         enable_events: bool = True,
+        edgar_max_filings: int = 50,
     ) -> None:
         self._csv: _CSVFundamentalData | None = None
         self._use_edgar = use_edgar
@@ -135,6 +136,7 @@ class EdgarDataManager:
         self._enable_insider = enable_insider
         self._enable_institutional = enable_institutional
         self._enable_events = enable_events
+        self._max_filings = edgar_max_filings
 
         # EDGAR source instances (lazy-initialized)
         self._financials_source = None
@@ -182,7 +184,9 @@ class EdgarDataManager:
             try:
                 from backtester.data.edgar_insider import EdgarInsiderSource
 
-                self._insider_source = EdgarInsiderSource(self._user_agent)
+                self._insider_source = EdgarInsiderSource(
+                    self._user_agent, max_filings=self._max_filings
+                )
             except ImportError:
                 logger.info("edgartools not installed; insider data disabled")
 
@@ -193,7 +197,7 @@ class EdgarDataManager:
                 )
 
                 self._institutional_source = EdgarInstitutionalSource(
-                    self._user_agent
+                    self._user_agent, max_filings=self._max_filings
                 )
             except ImportError:
                 logger.info(
@@ -204,7 +208,9 @@ class EdgarDataManager:
             try:
                 from backtester.data.edgar_events import EdgarEventSource
 
-                self._events_source = EdgarEventSource(self._user_agent)
+                self._events_source = EdgarEventSource(
+                    self._user_agent, max_filings=self._max_filings
+                )
             except ImportError:
                 logger.info("edgartools not installed; events data disabled")
 

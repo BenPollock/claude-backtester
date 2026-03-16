@@ -171,6 +171,7 @@ class BacktestEngine:
                 enable_insider=config.edgar_insider,
                 enable_institutional=config.edgar_institutional,
                 enable_events=config.edgar_events,
+                edgar_max_filings=config.edgar_max_filings,
             )
         elif config.fundamental_data_path:
             from backtester.data.fundamental import EdgarDataManager

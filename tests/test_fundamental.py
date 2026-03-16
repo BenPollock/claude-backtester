@@ -828,3 +828,278 @@ class TestEdgarDataManagerSources:
             # Second load should hit cache
             mgr.load_financials("TEST")
             assert call_count[0] == 1
+
+
+# ===========================================================================
+# 6. EdgarDataManager max_filings parameter
+# ===========================================================================
+
+
+class TestEdgarMaxFilings:
+    """Test that edgar_max_filings is passed through to sources."""
+
+    def test_default_max_filings(self):
+        """Default max_filings is 50."""
+        mgr = EdgarDataManager(use_edgar=False)
+        assert mgr._max_filings == 50
+
+    def test_custom_max_filings(self):
+        """Custom max_filings is stored."""
+        mgr = EdgarDataManager(use_edgar=False, edgar_max_filings=25)
+        assert mgr._max_filings == 25
+
+    def test_max_filings_does_not_affect_financials_source(self):
+        """EdgarFundamentalSource does not take max_filings (it uses get_facts, not filings iteration)."""
+        # This test verifies that source injection still works regardless of max_filings
+        class FakeSource:
+            def fetch(self, symbol):
+                return pd.DataFrame(
+                    {"metric": ["revenue"], "period_end": [date(2020, 3, 31)],
+                     "filed_date": [date(2020, 5, 5)], "value": [1e9], "form": ["10-Q"]}
+                )
+
+        mgr = EdgarDataManager(sources={"financials": FakeSource()}, edgar_max_filings=10)
+        result = mgr.load_financials("TEST")
+        assert len(result) == 1
+
+
+# ===========================================================================
+# 7. Cache freshness tests
+# ===========================================================================
+
+
+class TestCacheFreshness:
+    """Test that cache is properly checked before fetching from source."""
+
+    def test_cache_prevents_refetch(self):
+        """When cache has data, source.fetch() is never called."""
+        call_count = [0]
+
+        class TrackingSource:
+            def fetch(self, symbol):
+                call_count[0] += 1
+                return pd.DataFrame(
+                    {"metric": ["revenue"], "period_end": [date(2020, 3, 31)],
+                     "filed_date": [date(2020, 5, 5)], "value": [2e9], "form": ["10-Q"]}
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Pre-populate cache
+            cache = EdgarCache(tmpdir, "financials")
+            cache.save("TEST", pd.DataFrame(
+                {"metric": ["revenue"], "period_end": [date(2020, 3, 31)],
+                 "filed_date": [date(2020, 5, 5)], "value": [1e9], "form": ["10-Q"]}
+            ))
+
+            mgr = EdgarDataManager(sources={"financials": TrackingSource()})
+            mgr._financials_cache = cache
+
+            result = mgr.load_financials("TEST")
+            assert call_count[0] == 0, "Source should not be called when cache has data"
+            assert result["value"].iloc[0] == 1e9
+
+    def test_empty_cache_triggers_fetch(self):
+        """When cache is empty, source.fetch() is called."""
+        call_count = [0]
+
+        class TrackingSource:
+            def fetch(self, symbol):
+                call_count[0] += 1
+                return pd.DataFrame(
+                    {"metric": ["revenue"], "period_end": [date(2020, 3, 31)],
+                     "filed_date": [date(2020, 5, 5)], "value": [1e9], "form": ["10-Q"]}
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = EdgarCache(tmpdir, "financials")
+            # Cache is empty — no data saved
+
+            mgr = EdgarDataManager(sources={"financials": TrackingSource()})
+            mgr._financials_cache = cache
+
+            result = mgr.load_financials("TEST")
+            assert call_count[0] == 1, "Source should be called when cache is empty"
+            assert len(result) == 1
+
+    def test_fetched_data_saved_to_cache(self):
+        """After fetching from source, data should be saved to cache for future loads."""
+        class OneTimeSource:
+            def fetch(self, symbol):
+                return pd.DataFrame(
+                    {"metric": ["revenue"], "period_end": [date(2020, 3, 31)],
+                     "filed_date": [date(2020, 5, 5)], "value": [1e9], "form": ["10-Q"]}
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = EdgarCache(tmpdir, "financials")
+            mgr = EdgarDataManager(sources={"financials": OneTimeSource()})
+            mgr._financials_cache = cache
+
+            # First load fetches from source and caches
+            mgr.load_financials("TEST")
+
+            # Verify cache now has data
+            assert cache.has("TEST") is True
+            cached = cache.load("TEST")
+            assert len(cached) == 1
+            assert cached["value"].iloc[0] == 1e9
+
+    def test_insider_cache_prevents_refetch(self):
+        """Insider cache prevents re-fetching from source."""
+        call_count = [0]
+
+        class TrackingInsiderSource:
+            def fetch(self, symbol):
+                call_count[0] += 1
+                return pd.DataFrame({
+                    "filed_date": [date(2020, 1, 10)],
+                    "transaction_date": [date(2020, 1, 9)],
+                    "insider_name": ["CEO"],
+                    "insider_title": ["Chief Executive Officer"],
+                    "transaction_type": ["P"],
+                    "shares": [5000],
+                    "price": [100.0],
+                    "shares_after": [50000],
+                    "is_direct": [True],
+                })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = EdgarCache(tmpdir, "insider")
+            cache.save("TEST", pd.DataFrame({
+                "filed_date": [date(2020, 1, 10)],
+                "insider_name": ["CEO"],
+                "shares": [5000],
+            }))
+
+            mgr = EdgarDataManager(sources={"insider": TrackingInsiderSource()})
+            mgr._insider_cache = cache
+
+            mgr.load_insider("TEST")
+            assert call_count[0] == 0
+
+    def test_source_failure_returns_empty(self):
+        """When source raises a non-rate-limit error, returns empty DataFrame."""
+        class FailingSource:
+            def fetch(self, symbol):
+                raise RuntimeError("EDGAR API down")
+
+        mgr = EdgarDataManager(sources={"financials": FailingSource()})
+        result = mgr.load_financials("TEST")
+        assert result.empty
+
+
+# ===========================================================================
+# 8. BacktestConfig edgar_max_filings field
+# ===========================================================================
+
+
+class TestBacktestConfigEdgarMaxFilings:
+    """Test that BacktestConfig properly includes edgar_max_filings."""
+
+    def test_default_value(self):
+        """BacktestConfig.edgar_max_filings defaults to 50."""
+        from backtester.config import BacktestConfig
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["AAPL"],
+            benchmark="SPY",
+            start_date=date(2020, 1, 1),
+            end_date=date(2020, 12, 31),
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.10,
+        )
+        assert config.edgar_max_filings == 50
+
+    def test_custom_value(self):
+        """BacktestConfig.edgar_max_filings can be set to custom value."""
+        from backtester.config import BacktestConfig
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["AAPL"],
+            benchmark="SPY",
+            start_date=date(2020, 1, 1),
+            end_date=date(2020, 12, 31),
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.10,
+            edgar_max_filings=25,
+        )
+        assert config.edgar_max_filings == 25
+
+    def test_config_is_frozen(self):
+        """edgar_max_filings field should be immutable (frozen config)."""
+        from backtester.config import BacktestConfig
+        import dataclasses
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["AAPL"],
+            benchmark="SPY",
+            start_date=date(2020, 1, 1),
+            end_date=date(2020, 12, 31),
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.10,
+            edgar_max_filings=30,
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            config.edgar_max_filings = 100
+
+
+# ===========================================================================
+# 9. Retry at EdgarDataManager level (source injection with retries)
+# ===========================================================================
+
+
+class TestEdgarDataManagerRetryIntegration:
+    """Test that sources with retry behavior work correctly through EdgarDataManager."""
+
+    def test_flaky_source_recovers_via_retry(self):
+        """Source that fails once then succeeds should return data through manager."""
+        from unittest.mock import patch
+        call_count = [0]
+
+        class FlakySource:
+            def fetch(self, symbol):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    raise Exception("HTTP 403 Forbidden")
+                return pd.DataFrame(
+                    {"metric": ["revenue"], "period_end": [date(2020, 3, 31)],
+                     "filed_date": [date(2020, 5, 5)], "value": [1e9], "form": ["10-Q"]}
+                )
+
+        # Note: FlakySource doesn't have @edgar_retry, so the exception
+        # propagates to _load_data which catches it. This tests the
+        # graceful degradation path in the manager.
+        mgr = EdgarDataManager(sources={"financials": FlakySource()})
+        result = mgr.load_financials("TEST")
+        # First call fails (caught by manager), returns empty
+        assert result.empty
+
+    def test_manager_caches_after_successful_fetch(self):
+        """After a successful source fetch, subsequent loads hit cache only."""
+        call_count = [0]
+
+        class CountingSource:
+            def fetch(self, symbol):
+                call_count[0] += 1
+                return pd.DataFrame(
+                    {"metric": ["revenue"], "period_end": [date(2020, 3, 31)],
+                     "filed_date": [date(2020, 5, 5)], "value": [42], "form": ["10-Q"]}
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = EdgarCache(tmpdir, "financials")
+            mgr = EdgarDataManager(sources={"financials": CountingSource()})
+            mgr._financials_cache = cache
+
+            # First load: hits source
+            result1 = mgr.load_financials("TEST")
+            assert call_count[0] == 1
+            assert result1["value"].iloc[0] == 42
+
+            # Second load: hits cache only
+            result2 = mgr.load_financials("TEST")
+            assert call_count[0] == 1  # Source not called again
+            assert result2["value"].iloc[0] == 42

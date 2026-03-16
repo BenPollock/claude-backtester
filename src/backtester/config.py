@@ -85,6 +85,7 @@ class BacktestConfig:
     edgar_insider: bool = True                 # Form 4 insider trading
     edgar_institutional: bool = False          # 13F holdings (slower, optional)
     edgar_events: bool = True                  # 8-K material events
+    edgar_max_filings: int = 50                # Max filings per source (Form 4, 8-K, 13F)
 
     # --- Gap 14: Fill price model ---
     fill_price_model: str = "open"  # "open", "close", "vwap", "random"

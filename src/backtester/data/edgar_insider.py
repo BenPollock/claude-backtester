@@ -1,10 +1,11 @@
 """SEC EDGAR Form 4 insider trading data via edgartools."""
 
 import logging
-import time
 from datetime import date
 
 import pandas as pd
+
+from backtester.data.edgar_utils import edgar_retry
 
 logger = logging.getLogger(__name__)
 
@@ -38,22 +39,26 @@ class EdgarInsiderSource:
         price, shares_after, is_direct
     """
 
-    def __init__(self, user_agent: str) -> None:
+    def __init__(self, user_agent: str, max_filings: int = 50) -> None:
         if Company is None:
             raise ImportError(
                 "edgartools is required for EDGAR insider data. "
                 "Install it with: pip install edgartools"
             )
         self.user_agent = user_agent
+        self.max_filings = max_filings
 
+    @edgar_retry()
     def fetch(self, symbol: str) -> pd.DataFrame:
         """Fetch Form 4 insider transactions for *symbol*."""
         company = Company(symbol)
-        time.sleep(0.1)
 
         try:
             filings = company.get_filings(form="4")
-        except Exception:
+        except Exception as exc:
+            from backtester.data.edgar_utils import _is_rate_limit_error
+            if _is_rate_limit_error(exc):
+                raise
             logger.warning("Could not retrieve Form 4 filings for %s", symbol)
             return self._empty_df()
 
@@ -61,8 +66,7 @@ class EdgarInsiderSource:
             return self._empty_df()
 
         rows: list[dict] = []
-        for filing in filings:
-            time.sleep(0.1)  # rate-limit
+        for filing in filings[:self.max_filings]:
             try:
                 parsed = filing.obj()
                 if parsed is None:

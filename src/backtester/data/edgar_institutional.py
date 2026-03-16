@@ -1,10 +1,11 @@
 """SEC EDGAR 13F-HR institutional holdings data via edgartools."""
 
 import logging
-import time
 from datetime import date
 
 import pandas as pd
+
+from backtester.data.edgar_utils import edgar_retry
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,16 @@ class EdgarInstitutionalSource:
         filed_date, report_date, total_holders, total_shares, total_value
     """
 
-    def __init__(self, user_agent: str) -> None:
+    def __init__(self, user_agent: str, max_filings: int = 50) -> None:
         if Company is None:
             raise ImportError(
                 "edgartools is required for EDGAR institutional data. "
                 "Install it with: pip install edgartools"
             )
         self.user_agent = user_agent
+        self.max_filings = max_filings
 
+    @edgar_retry()
     def fetch(self, symbol: str) -> pd.DataFrame:
         """Fetch aggregated 13F institutional holding data for *symbol*.
 
@@ -50,11 +53,13 @@ class EdgarInstitutionalSource:
         and aggregates share counts by reporting period.
         """
         company = Company(symbol)
-        time.sleep(0.1)
 
         try:
             filings = company.get_filings(form="13F-HR")
-        except Exception:
+        except Exception as exc:
+            from backtester.data.edgar_utils import _is_rate_limit_error
+            if _is_rate_limit_error(exc):
+                raise
             logger.warning("Could not retrieve 13F filings for %s", symbol)
             return self._empty_df()
 
@@ -62,8 +67,7 @@ class EdgarInstitutionalSource:
             return self._empty_df()
 
         rows: list[dict] = []
-        for filing in filings:
-            time.sleep(0.1)
+        for filing in filings[:self.max_filings]:
             try:
                 filed_date = self._parse_date(
                     getattr(filing, "filing_date", None)
