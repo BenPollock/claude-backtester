@@ -330,3 +330,309 @@ class TestInsiderMerge:
         late = result.loc[result.index > pd.Timestamp(2020, 2, 5)]
         if not late.empty:
             assert late.iloc[0]["insider_net_shares_30d"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Fetch logic tests (mocked edgartools)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch, PropertyMock
+
+
+def _make_mock_filing(
+    filed_date,
+    owner_name,
+    owner_title,
+    issuer_name,
+    issuer_cik,
+    transactions_df,
+):
+    """Create a mock Form 4 filing object.
+
+    *transactions_df* is a DataFrame that the parsed Form 4 exposes via
+    ``non_derivative_table``.
+    """
+    filing = MagicMock()
+    filing.filing_date = filed_date
+
+    parsed = MagicMock()
+    parsed.owner_name = owner_name
+    parsed.owner_title = owner_title
+    parsed.issuer = MagicMock()
+    parsed.issuer.name = issuer_name
+    parsed.issuer.cik = issuer_cik
+    parsed.non_derivative_table = transactions_df
+    parsed.to_dataframe.return_value = transactions_df
+    # Legacy attributes should be None so the code falls through to the DF path
+    parsed.transactions = None
+    parsed.non_derivative_transactions = None
+
+    filing.obj.return_value = parsed
+    return filing
+
+
+def _make_txn_df(rows):
+    """Build a transactions DataFrame with standard column names."""
+    return pd.DataFrame(rows, columns=[
+        "transaction_code", "transaction_shares",
+        "transaction_price_per_share", "transaction_date",
+        "acquired_disposed_code", "shares_owned_following",
+        "direct_or_indirect_ownership",
+    ])
+
+
+class TestEdgarInsiderFetch:
+    """Tests for EdgarInsiderSource.fetch() with mocked edgartools."""
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_filters_out_zero_price_transactions(self, MockCompany):
+        """RSU grants with $0 price should be excluded."""
+        txn_df = _make_txn_df([
+            # $0 grant — should be filtered out
+            ["P", 1000, 0.0, date(2020, 1, 8), "A", 5000, "D"],
+            # Real purchase — should be kept
+            ["P", 500, 50.0, date(2020, 1, 9), "A", 5500, "D"],
+        ])
+        filing = _make_mock_filing(
+            filed_date=date(2020, 1, 10),
+            owner_name="Jane CEO",
+            owner_title="CEO",
+            issuer_name="TEST Inc",
+            issuer_cik=12345,
+            transactions_df=txn_df,
+        )
+        company = MagicMock()
+        company.cik = 12345
+        company.get_filings.return_value = [filing]
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("TEST")
+
+        assert len(result) == 1
+        assert result.iloc[0]["price"] == 50.0
+        assert result.iloc[0]["shares"] == 500.0
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_only_open_market_codes(self, MockCompany):
+        """Only P and S transaction codes should be included."""
+        txn_df = _make_txn_df([
+            ["P", 1000, 50.0, date(2020, 1, 8), "A", 5000, "D"],   # purchase — keep
+            ["S", 500, 55.0, date(2020, 1, 8), "D", 4500, "D"],     # sale — keep
+            ["A", 2000, 0.0, date(2020, 1, 8), "A", 6500, "D"],     # award — exclude
+            ["M", 1500, 30.0, date(2020, 1, 8), "A", 8000, "D"],    # derivative exercise — exclude
+        ])
+        filing = _make_mock_filing(
+            filed_date=date(2020, 1, 10),
+            owner_name="Jane CEO",
+            owner_title="CEO",
+            issuer_name="TEST Inc",
+            issuer_cik=12345,
+            transactions_df=txn_df,
+        )
+        company = MagicMock()
+        company.cik = 12345
+        company.get_filings.return_value = [filing]
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("TEST")
+
+        codes = set(result["transaction_type"].tolist())
+        assert codes == {"P", "S"}
+        assert len(result) == 2
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_issuer_mismatch_filtered(self, MockCompany):
+        """Filings where issuer doesn't match target symbol should be skipped."""
+        # Filing where issuer CIK (99999) != target company CIK (12345)
+        txn_df = _make_txn_df([
+            ["P", 1000, 50.0, date(2020, 1, 8), "A", 5000, "D"],
+        ])
+        wrong_issuer_filing = _make_mock_filing(
+            filed_date=date(2020, 1, 10),
+            owner_name="Jane CEO",
+            owner_title="CEO",
+            issuer_name="OTHER Corp",
+            issuer_cik=99999,
+            transactions_df=txn_df,
+        )
+        # Filing where issuer CIK matches target
+        right_issuer_filing = _make_mock_filing(
+            filed_date=date(2020, 1, 11),
+            owner_name="Bob CFO",
+            owner_title="CFO",
+            issuer_name="TEST Inc",
+            issuer_cik=12345,
+            transactions_df=txn_df,
+        )
+
+        company = MagicMock()
+        company.cik = 12345
+        company.get_filings.return_value = [wrong_issuer_filing, right_issuer_filing]
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("TEST")
+
+        # Only the matching-issuer filing should produce rows
+        assert len(result) == 1
+        assert result.iloc[0]["insider_name"] == "Bob CFO"
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_purchase_positive_sale_negative_in_fetch(self, MockCompany):
+        """Verify sign convention in fetch: P -> positive, S -> negative."""
+        txn_df = _make_txn_df([
+            ["P", 1000, 50.0, date(2020, 1, 8), "A", 5000, "D"],
+            ["S", 800, 55.0, date(2020, 1, 9), "D", 4200, "D"],
+        ])
+        filing = _make_mock_filing(
+            filed_date=date(2020, 1, 10),
+            owner_name="Jane CEO",
+            owner_title="CEO",
+            issuer_name="TEST Inc",
+            issuer_cik=12345,
+            transactions_df=txn_df,
+        )
+        company = MagicMock()
+        company.cik = 12345
+        company.get_filings.return_value = [filing]
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("TEST")
+
+        purchase = result[result["transaction_type"] == "P"].iloc[0]
+        sale = result[result["transaction_type"] == "S"].iloc[0]
+        assert purchase["shares"] == 1000.0  # positive
+        assert sale["shares"] == -800.0      # negative
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_empty_filings_returns_empty_df(self, MockCompany):
+        """No filings -> empty DataFrame with correct columns."""
+        company = MagicMock()
+        company.cik = 12345
+        company.get_filings.return_value = []
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("TEST")
+
+        from backtester.data.edgar_insider import _COLUMNS
+        assert list(result.columns) == _COLUMNS
+        assert len(result) == 0
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_dataframe_api_parsing(self, MockCompany):
+        """When parsed form returns DataFrame (non_derivative_table), parse correctly."""
+        txn_df = _make_txn_df([
+            ["P", 2000, 100.0, date(2020, 3, 1), "A", 12000, "D"],
+            ["S", 500, 105.0, date(2020, 3, 2), "D", 11500, "I"],
+        ])
+        filing = _make_mock_filing(
+            filed_date=date(2020, 3, 5),
+            owner_name="Alice Director",
+            owner_title="Director",
+            issuer_name="ACME Corp",
+            issuer_cik=54321,
+            transactions_df=txn_df,
+        )
+        company = MagicMock()
+        company.cik = 54321
+        company.get_filings.return_value = [filing]
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("ACME")
+
+        assert len(result) == 2
+        buy_row = result[result["transaction_type"] == "P"].iloc[0]
+        sell_row = result[result["transaction_type"] == "S"].iloc[0]
+
+        assert buy_row["shares"] == 2000.0
+        assert buy_row["price"] == 100.0
+        assert buy_row["insider_name"] == "Alice Director"
+        assert buy_row["is_direct"] == True  # noqa: E712 (numpy bool)
+
+        assert sell_row["shares"] == -500.0
+        assert sell_row["price"] == 105.0
+        assert sell_row["is_direct"] == False  # noqa: E712 (numpy bool)
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_legacy_iter_parsing_fallback(self, MockCompany):
+        """When non_derivative_table is None, fall back to legacy iterable API."""
+        filing = MagicMock()
+        filing.filing_date = date(2020, 2, 1)
+
+        parsed = MagicMock()
+        parsed.owner_name = "Legacy User"
+        parsed.owner_title = "VP"
+        parsed.issuer = MagicMock()
+        parsed.issuer.cik = 11111
+        # No DataFrame-based API
+        parsed.non_derivative_table = None
+        parsed.to_dataframe.side_effect = AttributeError("no method")
+
+        # Legacy iterable
+        txn = MagicMock()
+        txn.transaction_code = "P"
+        txn.transaction_shares = 300
+        txn.transaction_price_per_share = 75.0
+        txn.shares_owned_following = 1300
+        txn.transaction_date = date(2020, 1, 30)
+        txn.direct_or_indirect_ownership = "D"
+        txn.acquired_disposed_code = "A"
+        parsed.transactions = [txn]
+        parsed.non_derivative_transactions = None
+
+        filing.obj.return_value = parsed
+
+        company = MagicMock()
+        company.cik = 11111
+        company.get_filings.return_value = [filing]
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("LEG")
+
+        assert len(result) == 1
+        assert result.iloc[0]["shares"] == 300.0
+        assert result.iloc[0]["price"] == 75.0
+        assert result.iloc[0]["insider_name"] == "Legacy User"
+
+    @patch("backtester.data.edgar_insider.Company")
+    def test_none_filings_returns_empty_df(self, MockCompany):
+        """get_filings returning None -> empty DataFrame."""
+        company = MagicMock()
+        company.cik = 12345
+        company.get_filings.return_value = None
+        MockCompany.return_value = company
+
+        from backtester.data.edgar_insider import EdgarInsiderSource
+        source = EdgarInsiderSource.__new__(EdgarInsiderSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        result = source.fetch("TEST")
+
+        assert len(result) == 0

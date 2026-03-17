@@ -2,6 +2,7 @@
 
 import tempfile
 from datetime import date
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,11 @@ import pytest
 
 from backtester.data.fundamental import EdgarDataManager
 from backtester.data.fundamental_cache import EdgarCache
+from backtester.data.edgar_institutional import (
+    EdgarInstitutionalSource,
+    _COLUMNS,
+    _DEFAULT_MANAGERS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +270,349 @@ class TestInstitutionalMerge:
         if not after_q2.empty:
             assert after_q2["inst_holders_change_qoq"].iloc[0] == 20.0
             assert after_q2["inst_shares_change_pct"].iloc[0] == pytest.approx(0.20)
+
+
+# ---------------------------------------------------------------------------
+# Fetch test helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_holdings_df(entries):
+    """Create a mock 13F holdings DataFrame.
+
+    entries: list of dicts with keys like nameOfIssuer, ticker, shares, value.
+    If no 'ticker' key is provided, one is NOT added (to test name-based matching).
+    """
+    return pd.DataFrame(entries)
+
+
+def _make_mock_13f_filing(filed_date, report_date, holdings_df):
+    """Create a mock 13F filing object."""
+    filing = MagicMock()
+    filing.filing_date = filed_date
+    filing.report_date = report_date
+
+    parsed = MagicMock()
+    # Make the infotable attribute return our DataFrame
+    parsed.infotable = holdings_df
+    parsed.holdings = holdings_df
+    # Disable to_dataframe fallback so _extract_holdings picks up infotable
+    parsed.data = None
+    del parsed.to_dataframe
+    filing.obj.return_value = parsed
+    return filing
+
+
+def _make_mock_company(filings):
+    """Create a mock Company that returns the given filings."""
+    company = MagicMock()
+    company.get_filings.return_value = filings
+    return company
+
+
+# ---------------------------------------------------------------------------
+# Fetch tests
+# ---------------------------------------------------------------------------
+
+
+class TestEdgarInstitutionalFetch:
+    """Tests for EdgarInstitutionalSource.fetch() with mocked edgartools."""
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_finds_holdings_across_managers(self, mock_company_cls):
+        """Multiple managers holding same stock -> aggregated correctly."""
+        # Manager A holds 1000 shares of AAPL worth 150k
+        holdings_a = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 1000, "value": 150_000},
+        ])
+        filing_a = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings_a
+        )
+
+        # Manager B holds 2000 shares of AAPL worth 300k
+        holdings_b = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 2000, "value": 300_000},
+        ])
+        filing_b = _make_mock_13f_filing(
+            date(2024, 2, 15), date(2023, 12, 31), holdings_b
+        )
+
+        managers = {"111": "Manager A", "222": "Manager B"}
+
+        def side_effect(cik):
+            if cik == "111":
+                return _make_mock_company([filing_a])
+            elif cik == "222":
+                return _make_mock_company([filing_b])
+            return _make_mock_company([])
+
+        mock_company_cls.side_effect = side_effect
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = managers
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        assert not result.empty
+        # Both managers hold AAPL for same report_date, so aggregated
+        row = result[result["report_date"] == date(2023, 12, 31)]
+        assert len(row) == 1
+        assert row.iloc[0]["total_holders"] == 2
+        assert row.iloc[0]["total_shares"] == 3000
+        assert row.iloc[0]["total_value"] == 450_000
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_empty_when_no_manager_holds_symbol(self, mock_company_cls):
+        """No managers hold the target symbol -> empty DataFrame."""
+        # Manager holds MSFT only
+        holdings = _make_mock_holdings_df([
+            {"nameOfIssuer": "MICROSOFT CORP", "ticker": "MSFT", "shares": 5000, "value": 500_000},
+        ])
+        filing = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings
+        )
+
+        mock_company_cls.return_value = _make_mock_company([filing])
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = {"111": "Manager A"}
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        assert result.empty
+        assert list(result.columns) == _COLUMNS
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_aggregates_by_report_date(self, mock_company_cls):
+        """Holdings from same quarter aggregated into one row."""
+        # Two managers, same report_date
+        holdings_a = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 1000, "value": 100_000},
+        ])
+        holdings_b = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 3000, "value": 300_000},
+        ])
+
+        filing_a = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings_a
+        )
+        filing_b = _make_mock_13f_filing(
+            date(2024, 2, 15), date(2023, 12, 31), holdings_b
+        )
+
+        managers = {"111": "Manager A", "222": "Manager B"}
+
+        def side_effect(cik):
+            if cik == "111":
+                return _make_mock_company([filing_a])
+            elif cik == "222":
+                return _make_mock_company([filing_b])
+            return _make_mock_company([])
+
+        mock_company_cls.side_effect = side_effect
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = managers
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        # Should be one row for the one report_date
+        assert len(result) == 1
+        assert result.iloc[0]["total_shares"] == 4000
+        assert result.iloc[0]["total_value"] == 400_000
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_total_holders_counts_unique_managers(self, mock_company_cls):
+        """total_holders = number of unique managers holding the stock."""
+        holdings = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 500, "value": 50_000},
+        ])
+
+        managers = {}
+        companies = {}
+        for i in range(5):
+            cik = str(1000 + i)
+            managers[cik] = f"Manager {i}"
+            filing = _make_mock_13f_filing(
+                date(2024, 2, 14 + i), date(2023, 12, 31), holdings
+            )
+            companies[cik] = _make_mock_company([filing])
+
+        def side_effect(cik):
+            return companies.get(cik, _make_mock_company([]))
+
+        mock_company_cls.side_effect = side_effect
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = managers
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        assert len(result) == 1
+        assert result.iloc[0]["total_holders"] == 5
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_custom_manager_list(self, mock_company_cls):
+        """Constructor accepts custom manager list."""
+        custom_managers = {"999999": "Custom Fund"}
+
+        holdings = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 100, "value": 10_000},
+        ])
+        filing = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings
+        )
+        mock_company_cls.return_value = _make_mock_company([filing])
+
+        source = EdgarInstitutionalSource(
+            user_agent="test",
+            managers=custom_managers,
+            filings_per_manager=2,
+        )
+        assert source._managers == custom_managers
+        assert source._filings_per_manager == 2
+
+        result = source.fetch("AAPL")
+        assert not result.empty
+        assert result.iloc[0]["total_holders"] == 1
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_output_format_matches_columns(self, mock_company_cls):
+        """Output has exactly the expected columns."""
+        holdings = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 100, "value": 10_000},
+        ])
+        filing = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings
+        )
+        mock_company_cls.return_value = _make_mock_company([filing])
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = {"111": "Manager A"}
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        assert list(result.columns) == _COLUMNS
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_handles_manager_fetch_failure_gracefully(self, mock_company_cls):
+        """If one manager's fetch fails, others still work."""
+        holdings = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 500, "value": 50_000},
+        ])
+        filing = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings
+        )
+
+        # Manager A raises a non-rate-limit exception
+        bad_company = MagicMock()
+        bad_company.get_filings.side_effect = ValueError("network error")
+
+        good_company = _make_mock_company([filing])
+
+        def side_effect(cik):
+            if cik == "111":
+                return bad_company
+            return good_company
+
+        mock_company_cls.side_effect = side_effect
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = {"111": "Bad Manager", "222": "Good Manager"}
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        # Should still have data from the good manager
+        assert not result.empty
+        assert result.iloc[0]["total_holders"] == 1
+        assert result.iloc[0]["total_shares"] == 500
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_filter_by_ticker_column(self, mock_company_cls):
+        """Holdings with a ticker column use exact match."""
+        holdings = _make_mock_holdings_df([
+            {"ticker": "AAPL", "nameOfIssuer": "APPLE INC",
+             "shares": 1000, "value": 150_000},
+            {"ticker": "MSFT", "nameOfIssuer": "MICROSOFT CORP",
+             "shares": 2000, "value": 300_000},
+        ])
+        filing = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings
+        )
+        mock_company_cls.return_value = _make_mock_company([filing])
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = {"111": "Manager A"}
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        assert result.iloc[0]["total_shares"] == 1000
+        assert result.iloc[0]["total_value"] == 150_000
+
+    @patch("backtester.data.edgar_institutional.Company")
+    def test_multiple_quarters(self, mock_company_cls):
+        """Multiple filing periods produce multiple output rows."""
+        holdings_q4 = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 1000, "value": 100_000},
+        ])
+        holdings_q1 = _make_mock_holdings_df([
+            {"nameOfIssuer": "APPLE INC", "ticker": "AAPL", "shares": 1500, "value": 160_000},
+        ])
+
+        filing_q4 = _make_mock_13f_filing(
+            date(2024, 2, 14), date(2023, 12, 31), holdings_q4
+        )
+        filing_q1 = _make_mock_13f_filing(
+            date(2024, 5, 15), date(2024, 3, 31), holdings_q1
+        )
+        mock_company_cls.return_value = _make_mock_company(
+            [filing_q1, filing_q4]
+        )
+
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        source.user_agent = "test"
+        source.max_filings = 50
+        source._managers = {"111": "Manager A"}
+        source._filings_per_manager = 4
+
+        result = source.fetch("AAPL")
+
+        assert len(result) == 2
+        # Sorted by filed_date
+        assert result.iloc[0]["report_date"] == date(2023, 12, 31)
+        assert result.iloc[1]["report_date"] == date(2024, 3, 31)
+
+    def test_default_managers_populated(self):
+        """_DEFAULT_MANAGERS has a reasonable set of institutional investors."""
+        assert len(_DEFAULT_MANAGERS) >= 15
+        # Spot-check a well-known manager
+        assert "Berkshire Hathaway" in _DEFAULT_MANAGERS.values()
+        assert "BlackRock" in _DEFAULT_MANAGERS.values()
+
+    def test_empty_df_has_correct_columns(self):
+        """_empty_df() returns DataFrame with correct columns."""
+        source = EdgarInstitutionalSource.__new__(EdgarInstitutionalSource)
+        result = source._empty_df()
+        assert list(result.columns) == _COLUMNS
+        assert result.empty
