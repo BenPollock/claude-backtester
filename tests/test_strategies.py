@@ -880,6 +880,15 @@ class TestComputeIndicatorsNoCopy:
     def test_smart_money_no_mutation(self):
         self._check_no_mutation("smart_money")
 
+    def test_macro_aware_value_no_mutation(self):
+        self._check_no_mutation("macro_aware_value", {"sma_period": 10})
+
+    def test_sentiment_momentum_no_mutation(self):
+        self._check_no_mutation("sentiment_momentum", {"sma_period": 10})
+
+    def test_risk_regime_no_mutation(self):
+        self._check_no_mutation("risk_regime", {"sma_period": 10})
+
 
 # ---------------------------------------------------------------------------
 # size_order tests for SHORT and COVER
@@ -1163,3 +1172,501 @@ class TestSmartMoneyThreshold:
         row = self._make_row(inst_change=0.10)
         signal = s.generate_signals("TEST", row, None, state)
         assert signal == SignalAction.BUY
+
+
+# ---------------------------------------------------------------------------
+# MacroAwareValue unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestMacroAwareValue:
+    """Unit tests for MacroAwareValue strategy signal generation."""
+
+    @staticmethod
+    def _make_row(
+        close=100.0,
+        sma_trend=90.0,
+        f_score=7.0,
+        pe_ratio=12.0,
+        z_score=4.0,
+        yield_spread=1.5,
+        credit_spread=3.0,
+    ):
+        d = {
+            "Close": close,
+            "Open": close * 0.999,
+            "High": close * 1.01,
+            "Low": close * 0.99,
+            "Volume": 1_000_000,
+            "sma_trend": sma_trend,
+            "fund_piotroski_f": f_score,
+            "fund_pe_ratio": pe_ratio,
+            "fund_altman_z": z_score,
+            "fred_yield_spread_10y2y": yield_spread,
+            "fred_credit_spread_hy": credit_spread,
+        }
+        return pd.Series(d)
+
+    def test_buy_expansion_good_quality(self):
+        """Expansion regime + good F-Score + low P/E + safe Z → BUY."""
+        s = get_strategy("macro_aware_value")
+        s.configure({"sma_period": 50, "expansion_min_f": 5})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(f_score=6.0, pe_ratio=15.0, z_score=3.0)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY
+
+    def test_hold_no_fundamentals(self):
+        """Missing fund_ columns → HOLD (graceful degradation)."""
+        s = get_strategy("macro_aware_value")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = pd.Series({
+            "Close": 100.0, "Open": 99.9, "High": 101.0, "Low": 99.0,
+            "Volume": 1e6, "sma_trend": 90.0,
+        })
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_no_sma(self):
+        """SMA not yet computed (NaN) → HOLD."""
+        s = get_strategy("macro_aware_value")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(sma_trend=float("nan"))
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_below_sma(self):
+        """Price below SMA → no BUY even with great fundamentals."""
+        s = get_strategy("macro_aware_value")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(close=80.0, sma_trend=100.0, f_score=9.0)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_distressed(self):
+        """Z-Score below threshold → HOLD."""
+        s = get_strategy("macro_aware_value")
+        s.configure({"min_z_score": 1.8})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(z_score=1.5)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_contraction_tighter_fscore(self):
+        """Contraction regime requires higher F-Score."""
+        s = get_strategy("macro_aware_value")
+        s.configure({
+            "expansion_min_f": 5,
+            "contraction_min_f": 7,
+        })
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        # Contraction: inverted yield + wide credit spread
+        row = self._make_row(
+            f_score=6.0, yield_spread=-0.5, credit_spread=7.0,
+        )
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD, "F=6 should be blocked in contraction (needs 7)"
+
+    def test_contraction_high_fscore_passes(self):
+        """Contraction but F-Score meets tighter threshold → BUY."""
+        s = get_strategy("macro_aware_value")
+        s.configure({
+            "expansion_min_f": 5,
+            "contraction_min_f": 7,
+            "contraction_max_pe": 15.0,
+        })
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(
+            f_score=8.0, pe_ratio=12.0, yield_spread=-0.5, credit_spread=7.0,
+        )
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY
+
+    def test_no_macro_data_falls_back_to_conservative(self):
+        """Missing FRED columns → contraction thresholds (conservative)."""
+        s = get_strategy("macro_aware_value")
+        s.configure({
+            "expansion_min_f": 5,
+            "contraction_min_f": 7,
+        })
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = pd.Series({
+            "Close": 100.0, "Open": 99.9, "High": 101.0, "Low": 99.0,
+            "Volume": 1e6, "sma_trend": 90.0,
+            "fund_piotroski_f": 6.0,
+            "fund_pe_ratio": 12.0,
+            "fund_altman_z": 4.0,
+        })
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD, "F=6 < 7 contraction threshold → HOLD"
+
+    def test_sell_quality_deterioration(self):
+        """F-Score drops below 3 → SELL existing position."""
+        s = get_strategy("macro_aware_value")
+        state = PortfolioState(
+            cash=50_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        row = self._make_row(f_score=2.0, close=100.0, sma_trend=90.0)
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.SELL
+
+    def test_sell_trend_broken(self):
+        """Price drops below SMA → SELL existing position."""
+        s = get_strategy("macro_aware_value")
+        state = PortfolioState(
+            cash=50_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        # Close below SMA
+        row = self._make_row(close=85.0, sma_trend=90.0, f_score=7.0)
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.SELL
+
+    def test_hold_with_position_quality_ok(self):
+        """Good quality + above SMA with position → HOLD (no sell)."""
+        s = get_strategy("macro_aware_value")
+        state = PortfolioState(
+            cash=50_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        row = self._make_row(f_score=7.0, close=100.0, sma_trend=90.0, z_score=4.0)
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.HOLD
+
+    def test_configure_params(self):
+        """configure() updates all parameters."""
+        s = get_strategy("macro_aware_value")
+        s.configure({
+            "sma_period": 100,
+            "expansion_min_f": 4,
+            "contraction_min_f": 8,
+            "expansion_max_pe": 25.0,
+            "contraction_max_pe": 10.0,
+            "min_z_score": 2.0,
+            "credit_threshold": 4.0,
+        })
+        assert s.sma_period == 100
+        assert s.expansion_min_f == 4
+        assert s.contraction_min_f == 8
+        assert s.expansion_max_pe == 25.0
+        assert s.contraction_max_pe == 10.0
+        assert s.min_z_score == 2.0
+        assert s.credit_threshold == 4.0
+
+
+# ---------------------------------------------------------------------------
+# SentimentMomentum unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestSentimentMomentum:
+    """Unit tests for SentimentMomentum strategy signal generation."""
+
+    @staticmethod
+    def _make_row(
+        close=100.0,
+        sma_trend=90.0,
+        analyst_breadth=None,
+        insider_buy_ratio=None,
+    ):
+        d = {
+            "Close": close,
+            "Open": close * 0.999,
+            "High": close * 1.01,
+            "Low": close * 0.99,
+            "Volume": 1_000_000,
+            "sma_trend": sma_trend,
+        }
+        if analyst_breadth is not None:
+            d["analyst_rev_breadth"] = analyst_breadth
+        if insider_buy_ratio is not None:
+            d["insider_buy_ratio_90d"] = insider_buy_ratio
+        return pd.Series(d)
+
+    def test_buy_three_bullish_signals(self):
+        """Positive breadth + high insider buying + above SMA → BUY."""
+        s = get_strategy("sentiment_momentum")
+        s.configure({"sma_period": 10, "min_signals_buy": 2})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(
+            close=100.0, sma_trend=90.0,
+            analyst_breadth=0.5, insider_buy_ratio=0.8,
+        )
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY
+
+    def test_hold_sma_nan(self):
+        """SMA is NaN → HOLD."""
+        s = get_strategy("sentiment_momentum")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(sma_trend=float("nan"))
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_only_sma_bullish(self):
+        """Only SMA signal bullish (1/3) with threshold 2 → HOLD."""
+        s = get_strategy("sentiment_momentum")
+        s.configure({"min_signals_buy": 2})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        # Close > SMA (bullish), no analyst/insider data
+        row = self._make_row(close=100.0, sma_trend=90.0)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_sell_bearish_signals(self):
+        """Negative breadth + low insider + below SMA → SELL existing position."""
+        s = get_strategy("sentiment_momentum")
+        s.configure({"min_signals_sell": 2})
+        state = PortfolioState(
+            cash=50_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        row = self._make_row(
+            close=80.0, sma_trend=90.0,
+            analyst_breadth=-0.5, insider_buy_ratio=0.1,
+        )
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.SELL
+
+    def test_hold_with_position_neutral(self):
+        """Mixed signals with position → HOLD (no sell)."""
+        s = get_strategy("sentiment_momentum")
+        s.configure({"min_signals_sell": 3})
+        state = PortfolioState(
+            cash=50_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        # Bearish: below SMA. Bullish: positive breadth. → only 1 bearish, needs 3
+        row = self._make_row(
+            close=80.0, sma_trend=90.0,
+            analyst_breadth=0.5, insider_buy_ratio=0.5,
+        )
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.HOLD
+
+    def test_graceful_no_alt_data(self):
+        """No analyst/insider columns → only SMA signal counted."""
+        s = get_strategy("sentiment_momentum")
+        s.configure({"min_signals_buy": 1})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        # Close above SMA → 1 bullish, threshold=1 → BUY
+        row = self._make_row(close=100.0, sma_trend=90.0)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY
+
+    def test_configure_params(self):
+        """configure() updates all parameters."""
+        s = get_strategy("sentiment_momentum")
+        s.configure({
+            "sma_period": 100,
+            "min_signals_buy": 3,
+            "min_signals_sell": 3,
+            "insider_buy_threshold": 0.6,
+            "insider_sell_threshold": 0.2,
+        })
+        assert s.sma_period == 100
+        assert s.min_signals_buy == 3
+        assert s.min_signals_sell == 3
+        assert s.insider_buy_threshold == 0.6
+        assert s.insider_sell_threshold == 0.2
+
+
+# ---------------------------------------------------------------------------
+# RiskRegime unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestRiskRegime:
+    """Unit tests for RiskRegime strategy signal generation."""
+
+    @staticmethod
+    def _make_row(
+        close=100.0,
+        vix_ratio=0.85,
+        yield_spread=1.5,
+        credit_spread=3.0,
+        f_score=7.0,
+    ):
+        d = {
+            "Close": close,
+            "Open": close * 0.999,
+            "High": close * 1.01,
+            "Low": close * 0.99,
+            "Volume": 1_000_000,
+            "sma_trend": 90.0,
+        }
+        if vix_ratio is not None:
+            d["vix_ratio"] = vix_ratio
+        if yield_spread is not None:
+            d["fred_yield_spread_10y2y"] = yield_spread
+        if credit_spread is not None:
+            d["fred_credit_spread_hy"] = credit_spread
+        if f_score is not None:
+            d["fund_piotroski_f"] = f_score
+        return pd.Series(d)
+
+    def test_buy_full_risk_on(self):
+        """All 3 risk signals positive + good F-Score → BUY."""
+        s = get_strategy("risk_regime")
+        s.configure({"min_f_score": 5})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(vix_ratio=0.85, yield_spread=1.5, credit_spread=3.0, f_score=7.0)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY
+
+    def test_buy_risk_on_no_fscore(self):
+        """All 3 risk signals positive, no F-Score → BUY anyway."""
+        s = get_strategy("risk_regime")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(vix_ratio=0.85, yield_spread=1.5, credit_spread=3.0, f_score=None)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.BUY
+
+    def test_hold_low_fscore(self):
+        """All 3 risk signals positive but F-Score too low → HOLD."""
+        s = get_strategy("risk_regime")
+        s.configure({"min_f_score": 5})
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(vix_ratio=0.85, yield_spread=1.5, credit_spread=3.0, f_score=3.0)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_sell_full_risk_off(self):
+        """All 3 signals negative with position → SELL."""
+        s = get_strategy("risk_regime")
+        state = PortfolioState(
+            cash=50_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        row = self._make_row(vix_ratio=1.3, yield_spread=-0.5, credit_spread=8.0)
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.SELL
+
+    def test_hold_neutral_signals(self):
+        """1-2 signals positive → HOLD (no buy, no sell)."""
+        s = get_strategy("risk_regime")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        # 2 of 3 positive → neutral
+        row = self._make_row(vix_ratio=0.85, yield_spread=1.5, credit_spread=8.0)
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_no_macro_data(self):
+        """No macro columns at all → HOLD."""
+        s = get_strategy("risk_regime")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = pd.Series({
+            "Close": 100.0, "Open": 99.9, "High": 101.0, "Low": 99.0,
+            "Volume": 1e6, "sma_trend": 90.0,
+        })
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_partial_data_one_signal(self):
+        """Only VIX data (1 signal) → even if positive, needs score=3 for BUY."""
+        s = get_strategy("risk_regime")
+        state = PortfolioState(
+            cash=100_000.0, total_equity=100_000.0,
+            num_positions=0, position_symbols=frozenset(),
+        )
+        row = self._make_row(
+            vix_ratio=0.85,
+            yield_spread=None,
+            credit_spread=None,
+        )
+        signal = s.generate_signals("TEST", row, None, state)
+        assert signal == SignalAction.HOLD
+
+    def test_no_sell_neutral_with_position(self):
+        """Neutral signals (1-2 positive) with position → HOLD (no sell)."""
+        s = get_strategy("risk_regime")
+        state = PortfolioState(
+            cash=50_000.0, total_equity=100_000.0,
+            num_positions=1, position_symbols=frozenset({"TEST"}),
+        )
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        # 1 of 3 positive → score=1, not 0 → no sell
+        row = self._make_row(vix_ratio=0.85, yield_spread=-0.5, credit_spread=8.0)
+        signal = s.generate_signals("TEST", row, pos, state)
+        assert signal == SignalAction.HOLD
+
+    def test_configure_params(self):
+        """configure() updates all parameters."""
+        s = get_strategy("risk_regime")
+        s.configure({
+            "sma_period": 100,
+            "vix_threshold": 0.9,
+            "yield_spread_threshold": 0.5,
+            "credit_threshold": 4.0,
+            "min_f_score": 6,
+        })
+        assert s.sma_period == 100
+        assert s.vix_threshold == 0.9
+        assert s.yield_spread_threshold == 0.5
+        assert s.credit_threshold == 4.0
+        assert s.min_f_score == 6

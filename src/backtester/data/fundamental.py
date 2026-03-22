@@ -84,6 +84,9 @@ _FLOW_METRICS = {
     "dividends_paid",
     "research_dev",
     "ebitda",
+    "stock_repurchased",
+    "stock_issued_proceeds",
+    "stock_comp",
 }
 
 # Stock/balance-sheet metrics use latest value
@@ -94,6 +97,9 @@ _STOCK_METRICS = {
     "current_liabilities",
     "equity",
     "shares_outstanding",
+    "retained_earnings",
+    "total_liabilities",
+    "dividends_per_share",
 }
 
 
@@ -397,6 +403,14 @@ class EdgarDataManager:
         merged = self._compute_price_ratios(merged)
         # Compute margin and growth ratios
         merged = self._compute_fundamental_ratios(merged)
+        # Compute Piotroski F-Score
+        merged = self._compute_piotroski_f(merged)
+        # Compute Altman Z-Score (needs Close for market cap)
+        merged = self._compute_altman_z(merged)
+        # Compute Buyback / Shareholder Yield
+        merged = self._compute_shareholder_yield(merged)
+        # Compute Dividend Growth
+        merged = self._compute_dividend_growth(merged)
 
         return merged
 
@@ -667,6 +681,319 @@ class EdgarDataManager:
                 )
         else:
             df["fund_roe"] = np.nan
+
+        return df
+
+    # ------------------------------------------------------------------
+    # Derived metric computations
+    # ------------------------------------------------------------------
+
+    def _compute_piotroski_f(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute Piotroski F-Score (0-9) from fundamental data.
+
+        Nine binary criteria are summed. NaN inputs produce NaN for that
+        criterion but the remaining criteria still contribute to the total.
+        If *all* criteria are NaN the score is NaN.
+        """
+        ni_ttm = df.get("fund_net_income_ttm")
+        ta = df.get("fund_total_assets")
+        ocf_ttm = df.get("fund_operating_cf_ttm")
+        debt = df.get("fund_total_debt")
+        ca = df.get("fund_current_assets")
+        cl = df.get("fund_current_liabilities")
+        shares = df.get("fund_shares_outstanding")
+        gp = df.get("fund_gross_profit")
+        rev = df.get("fund_revenue")
+
+        criteria: list[pd.Series] = []
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # 1. ROA > 0
+            if ni_ttm is not None and ta is not None:
+                roa = pd.Series(
+                    np.where((ta != 0) & ta.notna(), ni_ttm / ta, np.nan),
+                    index=df.index,
+                )
+            else:
+                roa = pd.Series(np.nan, index=df.index)
+            criteria.append(pd.Series(
+                np.where(roa.notna(), (roa > 0).astype(float), np.nan),
+                index=df.index,
+            ))
+
+            # 2. CFO > 0
+            if ocf_ttm is not None:
+                criteria.append(pd.Series(
+                    np.where(ocf_ttm.notna(), (ocf_ttm > 0).astype(float), np.nan),
+                    index=df.index,
+                ))
+            else:
+                criteria.append(pd.Series(np.nan, index=df.index))
+
+            # 3. ROA change (current ROA > prior year ROA)
+            roa_prev = roa.shift(252)
+            criteria.append(pd.Series(
+                np.where(roa.notna() & roa_prev.notna(), (roa > roa_prev).astype(float), np.nan),
+                index=df.index,
+            ))
+
+            # 4. Accruals: CFO/TA > ROA
+            if ocf_ttm is not None and ta is not None:
+                cfo_ta = pd.Series(
+                    np.where((ta != 0) & ta.notna(), ocf_ttm / ta, np.nan),
+                    index=df.index,
+                )
+            else:
+                cfo_ta = pd.Series(np.nan, index=df.index)
+            criteria.append(pd.Series(
+                np.where(cfo_ta.notna() & roa.notna(), (cfo_ta > roa).astype(float), np.nan),
+                index=df.index,
+            ))
+
+            # 5. Leverage decreased: debt/assets < prior year
+            if debt is not None and ta is not None:
+                leverage = pd.Series(
+                    np.where((ta != 0) & ta.notna(), debt / ta, np.nan),
+                    index=df.index,
+                )
+            else:
+                leverage = pd.Series(np.nan, index=df.index)
+            lev_prev = leverage.shift(252)
+            criteria.append(pd.Series(
+                np.where(
+                    leverage.notna() & lev_prev.notna(),
+                    (leverage < lev_prev).astype(float),
+                    np.nan,
+                ),
+                index=df.index,
+            ))
+
+            # 6. Liquidity improved: current ratio > prior year
+            if ca is not None and cl is not None:
+                cur_ratio = pd.Series(
+                    np.where((cl != 0) & cl.notna(), ca / cl, np.nan),
+                    index=df.index,
+                )
+            else:
+                cur_ratio = pd.Series(np.nan, index=df.index)
+            cr_prev = cur_ratio.shift(252)
+            criteria.append(pd.Series(
+                np.where(
+                    cur_ratio.notna() & cr_prev.notna(),
+                    (cur_ratio > cr_prev).astype(float),
+                    np.nan,
+                ),
+                index=df.index,
+            ))
+
+            # 7. Dilution: shares_outstanding <= prior year
+            if shares is not None:
+                shares_prev = shares.shift(252)
+                criteria.append(pd.Series(
+                    np.where(
+                        shares.notna() & shares_prev.notna(),
+                        (shares <= shares_prev).astype(float),
+                        np.nan,
+                    ),
+                    index=df.index,
+                ))
+            else:
+                criteria.append(pd.Series(np.nan, index=df.index))
+
+            # 8. Gross margin improved
+            if gp is not None and rev is not None:
+                gm = pd.Series(
+                    np.where((rev != 0) & rev.notna(), gp / rev, np.nan),
+                    index=df.index,
+                )
+            else:
+                gm = pd.Series(np.nan, index=df.index)
+            gm_prev = gm.shift(252)
+            criteria.append(pd.Series(
+                np.where(
+                    gm.notna() & gm_prev.notna(),
+                    (gm > gm_prev).astype(float),
+                    np.nan,
+                ),
+                index=df.index,
+            ))
+
+            # 9. Asset turnover improved: revenue/total_assets > prior year
+            if rev is not None and ta is not None:
+                at = pd.Series(
+                    np.where((ta != 0) & ta.notna(), rev / ta, np.nan),
+                    index=df.index,
+                )
+            else:
+                at = pd.Series(np.nan, index=df.index)
+            at_prev = at.shift(252)
+            criteria.append(pd.Series(
+                np.where(
+                    at.notna() & at_prev.notna(),
+                    (at > at_prev).astype(float),
+                    np.nan,
+                ),
+                index=df.index,
+            ))
+
+        # Stack and nansum; all-NaN → NaN
+        stacked = np.column_stack(criteria)
+        all_nan = np.all(np.isnan(stacked), axis=1)
+        score = np.nansum(stacked, axis=1).astype(float)
+        score[all_nan] = np.nan
+        df["fund_piotroski_f"] = score
+
+        return df
+
+    def _compute_altman_z(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute Altman Z-Score and zone classification.
+
+        Z = 1.2*(WC/TA) + 1.4*(RE/TA) + 3.3*(OI/TA)
+            + 0.6*(MktCap/TL) + 1.0*(Rev/TA)
+        """
+        close = df.get("Close")
+        ta = df.get("fund_total_assets")
+        re = df.get("fund_retained_earnings")
+        oi = df.get("fund_operating_income")
+        tl = df.get("fund_total_liabilities")
+        rev = df.get("fund_revenue")
+        ca = df.get("fund_current_assets")
+        cl = df.get("fund_current_liabilities")
+        shares = df.get("fund_shares_outstanding")
+
+        df["fund_altman_z"] = np.nan
+        df["fund_altman_zone"] = np.nan
+
+        # Need at least total_assets and Close to compute anything useful
+        if ta is None or close is None:
+            return df
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # Working capital / total assets
+            if ca is not None and cl is not None:
+                wc = ca - cl
+                x1 = np.where((ta != 0) & ta.notna(), 1.2 * wc / ta, np.nan)
+            else:
+                x1 = np.full(len(df), np.nan)
+
+            # Retained earnings / total assets
+            if re is not None:
+                x2 = np.where((ta != 0) & ta.notna(), 1.4 * re / ta, np.nan)
+            else:
+                x2 = np.full(len(df), np.nan)
+
+            # Operating income / total assets
+            if oi is not None:
+                x3 = np.where((ta != 0) & ta.notna(), 3.3 * oi / ta, np.nan)
+            else:
+                x3 = np.full(len(df), np.nan)
+
+            # Market cap / total liabilities
+            if shares is not None and tl is not None:
+                mkt_cap = close * shares
+                x4 = np.where((tl != 0) & tl.notna(), 0.6 * mkt_cap / tl, np.nan)
+            else:
+                x4 = np.full(len(df), np.nan)
+
+            # Revenue / total assets
+            if rev is not None:
+                x5 = np.where((ta != 0) & ta.notna(), 1.0 * rev / ta, np.nan)
+            else:
+                x5 = np.full(len(df), np.nan)
+
+        components = np.column_stack([x1, x2, x3, x4, x5])
+        all_nan = np.all(np.isnan(components), axis=1)
+        z = np.nansum(components, axis=1).astype(float)
+        z[all_nan] = np.nan
+        df["fund_altman_z"] = z
+
+        # Zone classification
+        zone = pd.Series(np.nan, index=df.index, dtype=object)
+        zone[z > 2.99] = "safe"
+        zone[(z >= 1.8) & (z <= 2.99)] = "grey"
+        zone[z < 1.8] = "distress"
+        zone[np.isnan(z)] = np.nan
+        df["fund_altman_zone"] = zone
+
+        return df
+
+    def _compute_shareholder_yield(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute buyback yield and shareholder yield.
+
+        buyback_yield = (repurchased - issued) / market_cap
+        shareholder_yield = (net_buyback + dividends_paid - stock_comp) / market_cap
+        """
+        close = df.get("Close")
+        shares = df.get("fund_shares_outstanding")
+        repurchased = df.get("fund_stock_repurchased_ttm")
+        issued = df.get("fund_stock_issued_proceeds_ttm")
+        div_paid = df.get("fund_dividends_paid_ttm")
+        stock_comp = df.get("fund_stock_comp_ttm")
+
+        df["fund_buyback_yield"] = np.nan
+        df["fund_shareholder_yield"] = np.nan
+
+        if close is None or shares is None:
+            return df
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mkt_cap = close * shares
+
+            # Net buyback (fillna(0) for missing components)
+            rep = repurchased.fillna(0) if repurchased is not None else pd.Series(0, index=df.index)
+            iss = issued.fillna(0) if issued is not None else pd.Series(0, index=df.index)
+            net_buyback = rep - iss
+
+            df["fund_buyback_yield"] = np.where(
+                (mkt_cap != 0) & mkt_cap.notna(),
+                net_buyback / mkt_cap,
+                np.nan,
+            )
+
+            # Shareholder yield
+            div = div_paid.fillna(0) if div_paid is not None else pd.Series(0, index=df.index)
+            sc = stock_comp.fillna(0) if stock_comp is not None else pd.Series(0, index=df.index)
+            total = net_buyback + div - sc
+
+            df["fund_shareholder_yield"] = np.where(
+                (mkt_cap != 0) & mkt_cap.notna(),
+                total / mkt_cap,
+                np.nan,
+            )
+
+        return df
+
+    def _compute_dividend_growth(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute YoY dividend growth and payout ratio.
+
+        div_growth_yoy = (DPS - DPS_prev) / abs(DPS_prev)
+        payout_ratio   = dividends_paid_ttm / net_income_ttm
+        """
+        dps = df.get("fund_dividends_per_share")
+        div_paid = df.get("fund_dividends_paid_ttm")
+        ni_ttm = df.get("fund_net_income_ttm")
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # Dividend growth YoY
+            if dps is not None:
+                dps_prev = dps.shift(252)
+                df["fund_div_growth_yoy"] = np.where(
+                    (dps_prev != 0) & dps_prev.notna(),
+                    (dps - dps_prev) / np.abs(dps_prev),
+                    np.nan,
+                )
+            else:
+                df["fund_div_growth_yoy"] = np.nan
+
+            # Payout ratio
+            if div_paid is not None and ni_ttm is not None:
+                df["fund_payout_ratio"] = np.where(
+                    (ni_ttm != 0) & ni_ttm.notna(),
+                    div_paid / ni_ttm,
+                    np.nan,
+                )
+            else:
+                df["fund_payout_ratio"] = np.nan
 
         return df
 

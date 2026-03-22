@@ -87,6 +87,16 @@ class BacktestConfig:
     edgar_events: bool = True                  # 8-K material events
     edgar_max_filings: int = 50                # Max filings per source (Form 4, 8-K, 13F)
 
+    # --- Alternative data sources ---
+    use_vix: bool = False                      # VIX term structure data
+    use_intermarket: bool = False              # Cross-asset intermarket signals
+    use_fred: bool = False                     # FRED macro regime data
+    fred_api_key: str | None = None            # FRED API key (or FRED_API_KEY env var)
+    fred_regime_mode: str = "supplement"       # "supplement" (AND with SMA) or "replace"
+    use_yield_curve: bool = False              # Treasury yield curve data
+    use_pcr: bool = False                      # CBOE put-call ratio
+    use_analyst: bool = False                  # Analyst earnings revisions
+
     # --- Gap 14: Fill price model ---
     fill_price_model: str = "open"  # "open", "close", "vwap", "random"
 

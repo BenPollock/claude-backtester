@@ -199,6 +199,72 @@ class BacktestEngine:
                     symbol, universe_data[symbol]
                 )
 
+        # --- Alternative data loading and merging ---
+        if config.use_vix or config.use_intermarket:
+            from backtester.data.market_data import MarketDataManager
+            mkt_mgr = MarketDataManager(cache_dir=config.data_cache_dir)
+
+            if config.use_vix:
+                vix_df = mkt_mgr.load_vix_data(config.start_date, config.end_date)
+                if not vix_df.empty:
+                    for symbol in universe_data:
+                        universe_data[symbol] = self._merge_auxiliary_data(
+                            universe_data[symbol], vix_df
+                        )
+
+            if config.use_intermarket:
+                inter_df = mkt_mgr.load_intermarket_data(config.start_date, config.end_date)
+                if not inter_df.empty:
+                    for symbol in universe_data:
+                        universe_data[symbol] = self._merge_auxiliary_data(
+                            universe_data[symbol], inter_df
+                        )
+
+        if config.use_fred or config.use_yield_curve:
+            from backtester.data.fred_source import FredDataSource
+            fred_src = FredDataSource(
+                api_key=config.fred_api_key,
+                cache_dir=config.data_cache_dir,
+            )
+
+            if config.use_fred:
+                macro_df = fred_src.load_macro_regime(config.start_date, config.end_date)
+                if not macro_df.empty:
+                    for symbol in universe_data:
+                        universe_data[symbol] = self._merge_auxiliary_data(
+                            universe_data[symbol], macro_df
+                        )
+
+            if config.use_yield_curve:
+                yield_df = fred_src.load_yield_curve(config.start_date, config.end_date)
+                if not yield_df.empty:
+                    for symbol in universe_data:
+                        universe_data[symbol] = self._merge_auxiliary_data(
+                            universe_data[symbol], yield_df
+                        )
+
+        if config.use_pcr:
+            from backtester.data.sentiment import CBOEPutCallSource
+            pcr_src = CBOEPutCallSource(cache_dir=config.data_cache_dir)
+            pcr_df = pcr_src.load(config.start_date, config.end_date)
+            if not pcr_df.empty:
+                for symbol in universe_data:
+                    universe_data[symbol] = self._merge_auxiliary_data(
+                        universe_data[symbol], pcr_df
+                    )
+
+        if config.use_analyst:
+            from backtester.data.analyst import AnalystRevisionSource
+            analyst_src = AnalystRevisionSource(cache_dir=config.data_cache_dir)
+            for symbol in list(universe_data.keys()):
+                analyst_df = analyst_src.fetch(
+                    symbol, daily_index=universe_data[symbol].index
+                )
+                if not analyst_df.empty:
+                    universe_data[symbol] = self._merge_auxiliary_data(
+                        universe_data[symbol], analyst_df
+                    )
+
         # 3. Resample data for multi-timeframe strategies and compute indicators
         extra_timeframes = [tf for tf in strategy.timeframes if tf != "daily"]
 
@@ -233,6 +299,30 @@ class BacktestEngine:
             if config.regime_filter:
                 benchmark_data = self._compute_regime_indicators(benchmark_data)
             benchmark_data = strategy.compute_benchmark_indicators(benchmark_data)
+
+            # Merge VIX / FRED data onto benchmark for regime checks
+            if config.use_vix:
+                try:
+                    from backtester.data.market_data import MarketDataManager
+                    mkt_mgr_bm = MarketDataManager(cache_dir=config.data_cache_dir)
+                    vix_bm = mkt_mgr_bm.load_vix_data(config.start_date, config.end_date)
+                    if not vix_bm.empty:
+                        benchmark_data = self._merge_auxiliary_data(benchmark_data, vix_bm)
+                except Exception:
+                    pass
+
+            if config.use_fred:
+                try:
+                    from backtester.data.fred_source import FredDataSource
+                    fred_bm = FredDataSource(
+                        api_key=config.fred_api_key,
+                        cache_dir=config.data_cache_dir,
+                    )
+                    macro_bm = fred_bm.load_macro_regime(config.start_date, config.end_date)
+                    if not macro_bm.empty:
+                        benchmark_data = self._merge_auxiliary_data(benchmark_data, macro_bm)
+                except Exception:
+                    pass
 
         # 5. Get trading days
         trading_days = self._calendar.trading_days(config.start_date, config.end_date)
@@ -326,9 +416,10 @@ class BacktestEngine:
                 prev_day_date = day
                 continue
 
-            # e. Check regime filter
+            # e. Check regime filter (SMA, VIX, FRED)
             regime_on = True
-            if config.regime_filter and benchmark_data is not None and ts in benchmark_data.index:
+            has_regime_check = config.regime_filter or config.use_vix or config.use_fred
+            if has_regime_check and benchmark_data is not None and ts in benchmark_data.index:
                 regime_on = self._check_regime(benchmark_data.loc[ts])
 
             # Gap 45: Rebalance schedule — skip signal gen on non-rebalance days
@@ -741,6 +832,16 @@ class BacktestEngine:
         scale = config.target_portfolio_vol / realized_vol
         return min(scale, 2.0)  # cap at 200%
 
+    @staticmethod
+    def _merge_auxiliary_data(daily_df: pd.DataFrame, aux_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge time-indexed auxiliary data onto daily DataFrame.
+        Reindex to daily index + forward-fill (no lookahead)."""
+        result = daily_df.copy()
+        aux_reindexed = aux_df.reindex(result.index).ffill()
+        for col in aux_reindexed.columns:
+            result[col] = aux_reindexed[col]
+        return result
+
     def _compute_regime_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add regime filter indicator columns to benchmark data."""
         rf = self.config.regime_filter
@@ -755,21 +856,36 @@ class BacktestEngine:
     def _check_regime(self, benchmark_row: pd.Series) -> bool:
         """Return True if regime filter allows BUY signals."""
         rf = self.config.regime_filter
-        if rf is None:
-            return True
+        sma_ok = True
 
-        fast = benchmark_row.get("regime_fast")
-        slow = benchmark_row.get("regime_slow")
+        if rf is not None:
+            fast = benchmark_row.get("regime_fast")
+            slow = benchmark_row.get("regime_slow")
+            if not (pd.isna(fast) or pd.isna(slow)):
+                if rf.condition == "fast_above_slow":
+                    sma_ok = fast > slow
+                elif rf.condition == "fast_below_slow":
+                    sma_ok = fast < slow
 
-        if pd.isna(fast) or pd.isna(slow):
-            return True  # allow trading during warmup
+        # VIX regime check
+        vix_ok = True
+        if self.config.use_vix:
+            vix_ratio = benchmark_row.get("vix_ratio")
+            if vix_ratio is not None and not pd.isna(vix_ratio):
+                vix_ok = vix_ratio < 1.0  # Contango = allow trades
 
-        if rf.condition == "fast_above_slow":
-            return fast > slow
-        elif rf.condition == "fast_below_slow":
-            return fast < slow
+        # FRED macro regime check
+        fred_ok = True
+        if self.config.use_fred:
+            macro_score = benchmark_row.get("fred_macro_regime")
+            if macro_score is not None and not pd.isna(macro_score):
+                fred_ok = macro_score >= 0.5
 
-        return True  # unknown condition — default to allowing trades
+        # Combine based on mode
+        if self.config.fred_regime_mode == "replace":
+            return fred_ok and vix_ok
+        else:  # "supplement" — AND with SMA
+            return sma_ok and vix_ok and fred_ok
 
     def _force_close_all(self, portfolio: Portfolio, last_date: date) -> None:
         """Close all remaining positions at their last known market price."""

@@ -34,6 +34,9 @@ A modular, research-grade stock backtesting engine in Python. Supports pluggable
 - **Professional analytics** — CAGR, Sharpe, Sortino, max drawdown, VaR, CVaR, Omega, Treynor, MAE/MFE, turnover, TCA, capacity estimation, monthly returns, HTML tearsheets, regime analysis, signal decay, correlation/concentration metrics
 - **TOML config files** — Load all settings from a TOML file, with CLI overrides
 - **Progress bars** — tqdm progress indicators for backtest loops and parameter sweeps
+- **Alternative data sources** — VIX term structure, cross-asset intermarket (copper/gold, dollar), FRED macro regime, Treasury yield curve, CBOE put-call ratio, analyst earnings revisions
+- **EDGAR fundamental extensions** — Piotroski F-Score (0-9), Altman Z-Score (bankruptcy risk), buyback/shareholder yield, dividend growth rate and payout ratio
+- **Macro-aware strategies** — Macro Aware Value (regime-adaptive thresholds), Sentiment Momentum (multi-source signal aggregation), Risk Regime (VIX + yield curve + credit spread rotation)
 
 ## Requirements
 
@@ -48,6 +51,12 @@ pip install -e ".[dev]"
 
 # For Bayesian optimization (optional)
 pip install -e ".[optimize]"
+
+# For FRED macro data (optional)
+pip install -e ".[fred]"
+
+# For all optional dependencies (EDGAR + FRED + Bayesian)
+pip install -e ".[edgar,fred,optimize]"
 ```
 
 ## Examples
@@ -579,11 +588,186 @@ fee_model = "composite_us"
 
 ---
 
+### 32. EDGAR fundamental strategies (Piotroski F-Score, Altman Z-Score)
+
+```bash
+backtester run \
+  --strategy value_quality \
+  --tickers AAPL,MSFT,JNJ,PG,KO \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --use-edgar \
+  --params '{"min_f_score":6,"max_pe":18,"min_z_score":2.0}'
+```
+
+Enables EDGAR integration to pull 10-K/10-Q financial statements, insider trading (Form 4), and 8-K events. The engine computes Piotroski F-Score (0-9 quality score), Altman Z-Score (bankruptcy risk), buyback/shareholder yield, and dividend growth — available to any strategy as `fund_piotroski_f`, `fund_altman_z`, `fund_buyback_yield`, `fund_shareholder_yield`, `fund_div_growth_yoy`, and `fund_payout_ratio` columns.
+
+---
+
+### 33. VIX term structure regime signal
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY,QQQ \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --use-vix
+```
+
+Loads VIX and VIX3M from yfinance and computes term structure signals. Adds `vix_close`, `vix_3m`, `vix_ratio`, and `vix_regime` (contango/backwardation) columns to each ticker's DataFrame. VIX ratio > 1.0 indicates backwardation (market stress).
+
+---
+
+### 34. Cross-asset intermarket signals
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY,QQQ \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --use-intermarket
+```
+
+Loads copper futures (HG=F), gold futures (GC=F), and dollar index (DX-Y.NYB) via yfinance. Computes `intermarket_cu_au_ratio` (copper/gold — risk appetite indicator), `intermarket_cu_au_momentum` (63-day change), and `intermarket_dollar`.
+
+---
+
+### 35. FRED macro regime and yield curve
+
+```bash
+# Set your FRED API key (free from https://fred.stlouisfed.org/docs/api/api_key.html)
+export FRED_API_KEY="your_key_here"
+
+backtester run \
+  --strategy macro_aware_value \
+  --tickers AAPL,MSFT,JNJ,PG,KO \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --use-edgar \
+  --use-fred \
+  --use-yield-curve \
+  --fred-regime-mode supplement
+```
+
+Fetches macro indicators from FRED: yield curve spread (T10Y2Y), high-yield credit spread (BAMLH0A0HYM2), Leading Economic Index (USSLIND), and initial jobless claims (ICSA). Computes a composite `fred_macro_regime` score (0.0-1.0) based on bullish conditions. Treasury yield curve data adds `yield_2y`, `yield_10y`, `yield_spread`, `yield_real_10y`, and more.
+
+`--fred-regime-mode supplement` (default) uses FRED regime alongside the SMA regime filter (both must agree). Use `replace` to use FRED regime instead of the SMA filter.
+
+---
+
+### 36. CBOE put-call ratio
+
+```bash
+backtester run \
+  --strategy sma_crossover \
+  --tickers SPY \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --use-pcr
+```
+
+Downloads the equity put-call ratio from CBOE's free CSV endpoint. Adds `sentiment_pcr` (daily ratio) and `sentiment_pcr_ma10` (10-day moving average) columns. High PCR values (>1.0) indicate bearish sentiment, which can be used as a contrarian buy signal.
+
+---
+
+### 37. Analyst earnings revisions
+
+```bash
+backtester run \
+  --strategy sentiment_momentum \
+  --tickers AAPL,MSFT,GOOGL \
+  --benchmark SPY \
+  --start 2020-01-01 --end 2023-12-31 \
+  --use-edgar \
+  --use-analyst
+```
+
+Fetches analyst revision data from yfinance per symbol. Adds `analyst_rev_up_7d`, `analyst_rev_down_7d`, and `analyst_rev_breadth` (range -1 to 1) columns. **Limitation:** yfinance provides current-day snapshots only, not historical point-in-time estimates — most useful for paper trading.
+
+---
+
+### 38. Macro Aware Value strategy — regime-adaptive thresholds
+
+```bash
+backtester run \
+  --strategy macro_aware_value \
+  --tickers AAPL,MSFT,JNJ,PG,KO,XOM,JPM,UNH \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --use-edgar \
+  --use-fred \
+  --params '{"expansion_min_f":5,"contraction_min_f":7,"expansion_max_pe":20,"contraction_max_pe":15,"min_z_score":1.8}'
+```
+
+Tightens quality thresholds in macro contractions: requires higher F-Score and lower P/E when yield curve inverts or credit spreads widen. Always excludes distressed stocks (Altman Z < threshold) and requires price above SMA. Falls back to conservative thresholds when FRED data is unavailable.
+
+---
+
+### 39. Sentiment Momentum strategy — multi-source signal aggregation
+
+```bash
+backtester run \
+  --strategy sentiment_momentum \
+  --tickers AAPL,MSFT,GOOGL,AMZN \
+  --benchmark SPY \
+  --start 2015-01-01 --end 2023-12-31 \
+  --use-edgar \
+  --use-analyst \
+  --params '{"sma_period":50,"min_signals_buy":2,"min_signals_sell":2}'
+```
+
+Combines analyst revision breadth, insider buying activity, and price momentum (SMA). Counts bullish/bearish signals and trades when enough sources align. Gracefully degrades when data columns are missing — NaN inputs are treated as neutral.
+
+---
+
+### 40. Risk Regime strategy — VIX + yield curve + credit spread rotation
+
+```bash
+backtester run \
+  --strategy risk_regime \
+  --tickers AAPL,MSFT,GOOGL,AMZN,JPM,GS \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --use-vix \
+  --use-fred \
+  --use-edgar \
+  --params '{"vix_threshold":1.0,"yield_spread_threshold":0.0,"credit_threshold":5.0,"min_f_score":5}'
+```
+
+Scores three macro regime signals: VIX term structure (contango = risk-on), yield curve spread (positive = risk-on), and HY credit spread (low = risk-on). Enters positions only in full risk-on (score 3/3) with an optional Piotroski F-Score quality filter. Exits everything in full risk-off (score 0/3). Holds in neutral environments.
+
+---
+
+### 41. Combining all alt-data sources
+
+```bash
+export FRED_API_KEY="your_key_here"
+
+backtester run \
+  --strategy risk_regime \
+  --tickers AAPL,MSFT,JNJ,PG,KO \
+  --benchmark SPY \
+  --start 2010-01-01 --end 2023-12-31 \
+  --use-edgar \
+  --use-vix \
+  --use-intermarket \
+  --use-fred \
+  --use-yield-curve \
+  --use-pcr \
+  --use-analyst
+```
+
+All data sources are independently opt-in and can be combined freely. Each source adds prefixed columns (`fund_`, `vix_`, `intermarket_`, `fred_`, `yield_`, `sentiment_`, `analyst_`) that any strategy can access. Sources that fail to load gracefully degrade — the strategy simply won't see those columns.
+
+---
+
 ## Advanced Examples
 
 The examples below cover Python-API-only features (limit orders, multi-timeframe strategies, multi-strategy portfolios, cross-sectional strategies, fundamental data).
 
-### 32. Short selling with stops and regime filter
+### 42. Short selling with stops and regime filter
 
 ```bash
 backtester run \
@@ -605,7 +789,7 @@ Combines short selling (2% borrow cost, 150% margin) with risk management (5% st
 
 ---
 
-### 33. Limit orders — use Signal dataclass in custom strategies
+### 43. Limit orders — use Signal dataclass in custom strategies
 
 ```python
 from backtester.strategies.base import Signal
@@ -625,7 +809,7 @@ BUY limit orders fill when the day's Low reaches the limit price. SELL limits fi
 
 ---
 
-### 34. Stop orders via Signal dataclass
+### 44. Stop orders via Signal dataclass
 
 ```python
 from backtester.strategies.base import Signal
@@ -644,7 +828,7 @@ Stop orders trigger when the day's Low crosses the stop price (for sells) or Hig
 
 ---
 
-### 35. Cross-sectional strategy — rank and select from universe
+### 45. Cross-sectional strategy — rank and select from universe
 
 ```python
 from backtester.strategies.base import CrossSectionalStrategy
@@ -680,7 +864,7 @@ Cross-sectional strategies see all symbols at once and return a list of `(symbol
 
 ---
 
-### 36. Fundamental data in strategies
+### 46. Fundamental data in strategies
 
 ```python
 class ValueStrategy(Strategy):
@@ -706,7 +890,7 @@ The fundamental data CSV has columns `date,symbol,field,value`. Point-in-time lo
 
 ---
 
-### 37. Target-weight rebalancing strategy
+### 47. Target-weight rebalancing strategy
 
 ```python
 class EqualWeight(Strategy):
@@ -727,7 +911,7 @@ When a strategy returns target weights, the engine computes delta orders to reba
 
 ---
 
-### 38. Realistic fee models — percentage, tiered, and regulatory fees
+### 48. Realistic fee models — percentage, tiered, and regulatory fees
 
 **Percentage fees** — charge 5 basis points on notional value:
 
@@ -769,7 +953,7 @@ Fee models follow the `FeeModel` ABC. Use `CompositeFee` to stack multiple model
 
 ---
 
-### 39. Multi-timeframe strategy — weekly trend + daily entry
+### 49. Multi-timeframe strategy — weekly trend + daily entry
 
 ```python
 class WeeklyTrendDaily(Strategy):
@@ -800,7 +984,7 @@ The engine automatically resamples daily OHLCV to weekly/monthly bars (Open=firs
 
 ---
 
-### 40. Multi-strategy portfolio — run strategies side by side
+### 50. Multi-strategy portfolio — run strategies side by side
 
 ```python
 from backtester.research.multi_strategy import (
@@ -858,7 +1042,7 @@ backtester run \
 | Option | Description | Default |
 |---|---|---|
 | **Core** | | |
-| `--strategy` | Strategy name (`sma_crossover`, `rule_based`) | **required** |
+| `--strategy` | Strategy name (see `backtester list-strategies`) | **required** |
 | `--tickers` | Comma-separated ticker symbols | uses `--market`/`--universe` |
 | `--market` | Market scope when tickers omitted (`us`, `ca`, `us_ca`) | `us_ca` |
 | `--universe` | Universe breadth (`index`, `all`) | `index` |
@@ -904,6 +1088,23 @@ backtester run \
 | `--universe-file` | CSV with `date,symbol` for historical universe membership | disabled |
 | `--adjust-prices` | Price adjustment: `none`, `splits`, `splits_and_dividends` | `splits` |
 | `--fundamental-data` | Path to fundamental data CSV | disabled |
+| **EDGAR Data** | | |
+| `--use-edgar` | Enable SEC EDGAR data (10-K/10-Q, Form 4, 8-K) (flag) | `false` |
+| `--edgar-user-agent` | User-agent string for SEC EDGAR API | `claude-backtester research@example.com` |
+| `--no-edgar-financials` | Disable 10-K/10-Q financial statement loading (flag) | `false` |
+| `--no-edgar-insider` | Disable Form 4 insider trading loading (flag) | `false` |
+| `--edgar-institutional` | Enable 13F institutional holdings (slower) (flag) | `false` |
+| `--no-edgar-events` | Disable 8-K material events loading (flag) | `false` |
+| `--edgar-max-filings` | Max filings per EDGAR source (Form 4, 8-K, 13F) | `50` |
+| **Alternative Data** | | |
+| `--use-vix` | Enable VIX term structure data (flag) | `false` |
+| `--use-intermarket` | Enable cross-asset intermarket signals (flag) | `false` |
+| `--use-fred` | Enable FRED macro regime data (requires `FRED_API_KEY`) (flag) | `false` |
+| `--fred-api-key` | FRED API key (or set `FRED_API_KEY` env var) | disabled |
+| `--fred-regime-mode` | How FRED regime interacts with SMA filter: `supplement`, `replace` | `supplement` |
+| `--use-yield-curve` | Enable Treasury yield curve data from FRED (flag) | `false` |
+| `--use-pcr` | Enable CBOE equity put-call ratio (flag) | `false` |
+| `--use-analyst` | Enable analyst earnings revision data (flag) | `false` |
 | **Execution Realism** | | |
 | `--fill-price` | Fill price model: `open`, `close`, `vwap`, `random` | `open` |
 | `--max-volume-pct` | Max fraction of daily volume fillable | `0.10` |
@@ -1070,6 +1271,15 @@ src/backtester/
     csv_source.py     — CSVDataSource (load from CSV files)
     parquet_source.py — ParquetDataSource (load from Parquet files)
     fundamental.py    — FundamentalDataManager (point-in-time lookups)
+    edgar_source.py   — EDGAR 10-K/10-Q financial statements (edgartools)
+    edgar_insider.py  — EDGAR Form 4 insider trading data
+    edgar_institutional.py — EDGAR 13F institutional holdings
+    edgar_events.py   — EDGAR 8-K material event signals
+    fundamental_cache.py — Parquet cache for all EDGAR data types
+    market_data.py    — VIX term structure + cross-asset intermarket data (yfinance)
+    fred_source.py    — FRED macro regime + Treasury yield curve (fredapi)
+    sentiment.py      — CBOE equity put-call ratio
+    analyst.py        — Analyst earnings revisions (yfinance)
     universe.py       — Universe provider (S&P 500, TSX), HistoricalUniverse
   strategies/
     base.py           — Strategy ABC, CrossSectionalStrategy ABC, Signal dataclass
@@ -1077,6 +1287,14 @@ src/backtester/
     indicators.py     — 18 vectorized indicator functions
     sma_crossover.py  — SMA crossover strategy
     rule_based.py     — Rule-based DSL strategy
+    value_quality.py  — Value + quality + trend filter (EDGAR)
+    earnings_growth.py — Growth momentum combo (EDGAR)
+    fundamental_screener.py — Flexible JSON rule-based screening (EDGAR)
+    insider_following.py — Follow insider buying/selling signals (EDGAR)
+    smart_money.py    — Institutional + insider + fundamental combo (EDGAR)
+    macro_aware_value.py — Regime-adaptive value (FRED macro + EDGAR fundamentals)
+    sentiment_momentum.py — Multi-signal sentiment (analyst + insider + SMA)
+    risk_regime.py    — Risk regime rotation (VIX + yield curve + credit spread)
   execution/
     broker.py         — SimulatedBroker (market/limit/stop/bracket fills, partial fills)
     slippage.py       — FixedSlippage, VolumeSlippage, SqrtImpactSlippage

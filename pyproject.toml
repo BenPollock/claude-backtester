@@ -30,6 +30,13 @@ optimize = [
 edgar = [
     "edgartools>=2.0",
 ]
+fred = [
+    "fredapi>=0.5",
+]
+all = [
+    "edgartools>=2.0",
+    "fredapi>=0.5",
+]
 
 [project.scripts]
 backtester = "backtester.cli:cli"

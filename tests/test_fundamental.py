@@ -1103,3 +1103,216 @@ class TestEdgarDataManagerRetryIntegration:
             result2 = mgr.load_financials("TEST")
             assert call_count[0] == 1  # Source not called again
             assert result2["value"].iloc[0] == 42
+
+
+# ===========================================================================
+# 10. Flow/Stock metric classification tests
+# ===========================================================================
+
+
+class TestMetricClassification:
+    """Verify new TAG_MAP entries are classified correctly as flow or stock."""
+
+    def test_new_flow_metrics_in_set(self):
+        """stock_repurchased, stock_issued_proceeds, stock_comp are flow metrics."""
+        from backtester.data.fundamental import _FLOW_METRICS
+
+        assert "stock_repurchased" in _FLOW_METRICS
+        assert "stock_issued_proceeds" in _FLOW_METRICS
+        assert "stock_comp" in _FLOW_METRICS
+
+    def test_new_stock_metrics_in_set(self):
+        """retained_earnings, total_liabilities, dividends_per_share are stock metrics."""
+        from backtester.data.fundamental import _STOCK_METRICS
+
+        assert "retained_earnings" in _STOCK_METRICS
+        assert "total_liabilities" in _STOCK_METRICS
+        assert "dividends_per_share" in _STOCK_METRICS
+
+    def test_no_overlap_between_flow_and_stock(self):
+        """Flow and stock metric sets must not overlap."""
+        from backtester.data.fundamental import _FLOW_METRICS, _STOCK_METRICS
+
+        overlap = _FLOW_METRICS & _STOCK_METRICS
+        assert not overlap, f"Overlapping metrics: {overlap}"
+
+    def test_all_tag_map_entries_classified(self):
+        """Every TAG_MAP metric should be in either _FLOW_METRICS or _STOCK_METRICS."""
+        from backtester.data.edgar_source import TAG_MAP
+        from backtester.data.fundamental import _FLOW_METRICS, _STOCK_METRICS
+
+        all_classified = _FLOW_METRICS | _STOCK_METRICS
+        for metric in TAG_MAP:
+            assert metric in all_classified, (
+                f"TAG_MAP metric '{metric}' is not in _FLOW_METRICS or _STOCK_METRICS"
+            )
+
+
+# ===========================================================================
+# 11. TTM computation for new flow metrics
+# ===========================================================================
+
+
+class TestTTMNewMetrics:
+    """Verify TTM computation works for new flow metrics (buyback, stock_comp)."""
+
+    def test_ttm_buyback_metrics(self):
+        """stock_repurchased and stock_issued_proceeds get TTM columns after merge."""
+        fin_rows = []
+        # 4 quarters of buyback data
+        for q in range(4):
+            pe = date(2020, 3, 31) + timedelta(days=91 * q)
+            fd = pe + timedelta(days=35)
+            for metric, val in [
+                ("revenue", 1e9),
+                ("stock_repurchased", 1e7 * (q + 1)),
+                ("stock_issued_proceeds", 5e6),
+                ("stock_comp", 2e6),
+                ("shares_outstanding", 1e7),
+                ("total_assets", 2e9),
+            ]:
+                fin_rows.append({
+                    "metric": metric,
+                    "period_end": pe,
+                    "filed_date": fd,
+                    "value": val,
+                    "form": "10-Q",
+                })
+
+        fin_df = pd.DataFrame(fin_rows)
+        mgr = _make_manager_with_cached_financials("TEST", fin_df)
+        daily_df = make_daily_df(start="2020-01-02", days=400)
+
+        result = mgr.merge_all_onto_daily("TEST", daily_df)
+
+        # TTM columns should exist
+        assert "fund_stock_repurchased_ttm" in result.columns
+        assert "fund_stock_issued_proceeds_ttm" in result.columns
+        assert "fund_stock_comp_ttm" in result.columns
+
+        # After all 4 quarters filed, TTM for stock_repurchased should be
+        # sum of 1e7 + 2e7 + 3e7 + 4e7 = 1e8
+        last_row = result.iloc[-1]
+        if not np.isnan(last_row.get("fund_stock_repurchased_ttm", np.nan)):
+            assert last_row["fund_stock_repurchased_ttm"] == 1e7 + 2e7 + 3e7 + 4e7
+
+    def test_shareholder_yield_in_merged_output(self):
+        """After full merge, fund_buyback_yield and fund_shareholder_yield exist."""
+        fin_rows = []
+        for q in range(4):
+            pe = date(2020, 3, 31) + timedelta(days=91 * q)
+            fd = pe + timedelta(days=35)
+            for metric, val in [
+                ("revenue", 1e9),
+                ("shares_outstanding", 1e7),
+                ("stock_repurchased", 5e7),
+                ("stock_issued_proceeds", 1e7),
+                ("dividends_paid", 5e6),
+                ("stock_comp", 2e6),
+                ("total_assets", 2e9),
+            ]:
+                fin_rows.append({
+                    "metric": metric,
+                    "period_end": pe,
+                    "filed_date": fd,
+                    "value": val,
+                    "form": "10-Q",
+                })
+        fin_df = pd.DataFrame(fin_rows)
+        mgr = _make_manager_with_cached_financials("TEST", fin_df)
+        daily_df = make_daily_df(start="2020-01-02", days=400)
+
+        result = mgr.merge_all_onto_daily("TEST", daily_df)
+        assert "fund_buyback_yield" in result.columns
+        assert "fund_shareholder_yield" in result.columns
+
+    def test_dividend_growth_in_merged_output(self):
+        """After full merge, fund_div_growth_yoy and fund_payout_ratio exist."""
+        fin_rows = []
+        for q in range(4):
+            pe = date(2020, 3, 31) + timedelta(days=91 * q)
+            fd = pe + timedelta(days=35)
+            for metric, val in [
+                ("revenue", 1e9),
+                ("net_income", 1e8),
+                ("dividends_paid", 5e6),
+                ("dividends_per_share", 0.50),
+                ("shares_outstanding", 1e7),
+                ("total_assets", 2e9),
+            ]:
+                fin_rows.append({
+                    "metric": metric,
+                    "period_end": pe,
+                    "filed_date": fd,
+                    "value": val,
+                    "form": "10-Q",
+                })
+        fin_df = pd.DataFrame(fin_rows)
+        mgr = _make_manager_with_cached_financials("TEST", fin_df)
+        daily_df = make_daily_df(start="2020-01-02", days=400)
+
+        result = mgr.merge_all_onto_daily("TEST", daily_df)
+        assert "fund_div_growth_yoy" in result.columns
+        assert "fund_payout_ratio" in result.columns
+
+    def test_altman_z_in_merged_output(self):
+        """After full merge, fund_altman_z and fund_altman_zone exist."""
+        fin_rows = []
+        for q in range(4):
+            pe = date(2020, 3, 31) + timedelta(days=91 * q)
+            fd = pe + timedelta(days=35)
+            for metric, val in [
+                ("revenue", 1e9),
+                ("operating_income", 1.5e8),
+                ("retained_earnings", 5e8),
+                ("total_assets", 2e9),
+                ("total_liabilities", 1e9),
+                ("current_assets", 8e8),
+                ("current_liabilities", 4e8),
+                ("shares_outstanding", 1e7),
+            ]:
+                fin_rows.append({
+                    "metric": metric,
+                    "period_end": pe,
+                    "filed_date": fd,
+                    "value": val,
+                    "form": "10-Q",
+                })
+        fin_df = pd.DataFrame(fin_rows)
+        mgr = _make_manager_with_cached_financials("TEST", fin_df)
+        daily_df = make_daily_df(start="2020-01-02", days=400)
+
+        result = mgr.merge_all_onto_daily("TEST", daily_df)
+        assert "fund_altman_z" in result.columns
+        assert "fund_altman_zone" in result.columns
+
+    def test_piotroski_in_merged_output(self):
+        """After full merge, fund_piotroski_f column exists."""
+        fin_rows = []
+        for q in range(4):
+            pe = date(2020, 3, 31) + timedelta(days=91 * q)
+            fd = pe + timedelta(days=35)
+            for metric, val in [
+                ("revenue", 1e9),
+                ("net_income", 1e8),
+                ("operating_cf", 1.2e8),
+                ("total_assets", 2e9),
+                ("total_debt", 5e8),
+                ("current_assets", 8e8),
+                ("current_liabilities", 4e8),
+                ("shares_outstanding", 1e7),
+                ("gross_profit", 4e8),
+            ]:
+                fin_rows.append({
+                    "metric": metric,
+                    "period_end": pe,
+                    "filed_date": fd,
+                    "value": val,
+                    "form": "10-Q",
+                })
+        fin_df = pd.DataFrame(fin_rows)
+        mgr = _make_manager_with_cached_financials("TEST", fin_df)
+        daily_df = make_daily_df(start="2020-01-02", days=400)
+
+        result = mgr.merge_all_onto_daily("TEST", daily_df)
+        assert "fund_piotroski_f" in result.columns

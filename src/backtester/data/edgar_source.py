@@ -45,6 +45,15 @@ TAG_MAP: dict[str, list[str]] = {
         "WeightedAverageNumberOfDilutedSharesOutstanding",
     ],
     "research_dev": ["ResearchAndDevelopmentExpense"],
+    # Altman Z-Score
+    "retained_earnings": ["RetainedEarningsAccumulatedDeficit"],
+    "total_liabilities": ["Liabilities"],
+    # Buyback / Shareholder Yield
+    "stock_repurchased": ["PaymentsForRepurchaseOfCommonStock"],
+    "stock_issued_proceeds": ["ProceedsFromIssuanceOfCommonStock"],
+    "stock_comp": ["ShareBasedCompensation", "AllocatedShareBasedCompensationExpense"],
+    # Dividend Growth
+    "dividends_per_share": ["CommonStockDividendsPerShareDeclared", "CommonStockDividendsPerShareCashPaid"],
 }
 
 

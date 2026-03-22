@@ -8,17 +8,18 @@
 | Engine | `src/backtester/engine.py` | Central orchestrator: data load, day loop, regime filter, stop triggers, short selling, limit orders, multi-timeframe |
 | Data | `src/backtester/data/` | Cache-first OHLCV loading (Parquet), NYSE calendar, Yahoo fetcher, universe scraper, `resample_ohlcv()` for multi-timeframe |
 | EDGAR Data | `src/backtester/data/edgar_*.py`, `fundamental.py`, `fundamental_cache.py` | SEC EDGAR integration: financial statements (10-K/10-Q), insider trading (Form 4), institutional holdings (13F), material events (8-K). EdgarDataManager merges all onto daily DataFrames with `fund_`/`insider_`/`inst_`/`event_` prefixed columns |
-| Strategies | `src/backtester/strategies/` | Strategy ABC + registry, SMA crossover, rule-based DSL, value_quality, earnings_growth, fundamental_screener, insider_following, smart_money, 18 indicator functions, `Signal` dataclass for limit orders, `timeframes` property |
+| Alt Data | `src/backtester/data/market_data.py`, `fred_source.py`, `sentiment.py`, `analyst.py` | VIX term structure + intermarket (yfinance), FRED macro regime + yield curve (fredapi), CBOE put-call ratio, analyst revisions. All merged onto daily DataFrames with `vix_`/`intermarket_`/`fred_`/`yield_`/`sentiment_`/`analyst_` prefixed columns |
+| Strategies | `src/backtester/strategies/` | Strategy ABC + registry, SMA crossover, rule-based DSL, value_quality, earnings_growth, fundamental_screener, insider_following, smart_money, macro_aware_value, sentiment_momentum, risk_regime, 18 indicator functions, `Signal` dataclass for limit orders, `timeframes` property |
 | Execution | `src/backtester/execution/` | SimulatedBroker (next-day fills, limit orders, short fills), slippage/fee models, position sizers |
 | Portfolio | `src/backtester/portfolio/` | Mutable Portfolio state, FIFO Position/Lot tracking (long + short), Order/Fill/Trade models, margin tracking |
 | Analytics | `src/backtester/analytics/` | CAGR/Sharpe/drawdown metrics, report output, Monte Carlo, calendar analytics, tearsheet, correlation/concentration, signal decay, regime analysis |
 | Research | `src/backtester/research/` | Grid search parameter optimization, walk-forward IS/OOS analysis, multi-strategy portfolio |
-| Tests | `tests/` | ~1116 tests, 27+ files, all synthetic data, no network calls |
+| Tests | `tests/` | ~1554 tests, 56 files, all synthetic data, no network calls |
 
 ## Key Data Flows
 
 **Main Backtest Pipeline:**
-CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `DataManager.load_many()` (cache-first) --> `EdgarDataManager.merge_all_onto_daily()` (if EDGAR enabled, adds `fund_`/`insider_`/`inst_`/`event_` columns) --> `strategy.compute_indicators()` (vectorized, once per ticker) --> day-by-day loop --> `BacktestResult` --> `print_report()`
+CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `DataManager.load_many()` (cache-first) --> `EdgarDataManager.merge_all_onto_daily()` (if EDGAR enabled, adds `fund_`/`insider_`/`inst_`/`event_` columns) --> `_merge_auxiliary_data()` (if alt-data enabled, adds `vix_`/`intermarket_`/`fred_`/`yield_`/`sentiment_`/`analyst_` columns) --> `strategy.compute_indicators()` (vectorized, once per ticker) --> day-by-day loop --> `BacktestResult` --> `print_report()`
 
 **Day Loop (strict order -- do not reorder):**
 1. `broker.process_fills()` -- fill yesterday's orders at today's Open
@@ -34,6 +35,9 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 - Step 6 now handles SHORT/COVER signals, unwraps `Signal` objects for limit orders
 - Engine resamples multi-timeframe data and merges into daily DataFrames before the loop
 
+**Day Loop (additions for alt-data):**
+- Step 6 regime filter (`_is_regime_on()`) now also checks VIX ratio (< 1.0 = contango = allow) and FRED macro score (>= 0.5 = allow). Mode "supplement" ANDs with SMA; "replace" uses only FRED+VIX
+
 **Order Lifecycle:**
 `strategy.generate_signals()` returns `SignalAction` or `Signal` --> engine sizes order (BUY: PositionSizer; SELL/COVER: `strategy.size_order()` returning -1 sentinel; SHORT: negative qty) --> `broker.submit_order()` queues --> next day `process_fills()` determines fill price (Open for market, limit_price for limits if H/L range reached) --> applies slippage/fees --> routes by `order.reason` (short_entry/cover) --> mutates Portfolio. Unfilled DAY limit orders expire; GTC persist.
 
@@ -44,7 +48,7 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 
 | Interface | Location | Implementations |
 |-----------|----------|-----------------|
-| `Strategy` ABC | `strategies/base.py` | `SmaCrossover`, `RuleBasedStrategy`, `ValueQuality`, `EarningsGrowth`, `FundamentalScreener`, `InsiderFollowing`, `SmartMoney` |
+| `Strategy` ABC | `strategies/base.py` | `SmaCrossover`, `RuleBasedStrategy`, `ValueQuality`, `EarningsGrowth`, `FundamentalScreener`, `InsiderFollowing`, `SmartMoney`, `MacroAwareValue`, `SentimentMomentum`, `RiskRegime` |
 | `@register_strategy` | `strategies/registry.py` | Decorator populates `_REGISTRY` dict; lookup via `get_strategy(name)` |
 | `DataSource` ABC | `data/manager.py` | `YahooDataSource` |
 | `SlippageModel` ABC | `execution/slippage.py` | `FixedSlippage`, `VolumeSlippage` |
@@ -52,6 +56,10 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 | `PositionSizer` ABC | `execution/position_sizing.py` | `FixedFractional`, `ATRSizer`, `VolatilityParity` |
 | `Signal` dataclass | `strategies/base.py` | Wraps `SignalAction` with `limit_price`, `time_in_force`, `expiry_date` |
 | `StrategyAllocation` / `MultiStrategyConfig` | `research/multi_strategy.py` | Frozen dataclasses for multi-strategy portfolio definitions |
+| `MarketDataManager` | `data/market_data.py` | VIX term structure + intermarket data via yfinance |
+| `FredDataSource` | `data/fred_source.py` | FRED macro regime + Treasury yield curve (requires fredapi) |
+| `CBOEPutCallSource` | `data/sentiment.py` | CBOE equity put-call ratio from free CSV endpoint |
+| `AnalystRevisionSource` | `data/analyst.py` | Analyst earnings revisions via yfinance (per-symbol, snapshot-only) |
 
 ## Critical Invariants
 
@@ -75,6 +83,13 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 - **EDGAR Graceful Degradation:** All EDGAR strategies check for required columns and return HOLD if absent. Safe to run without `--use-edgar`.
 - **EDGAR Cache Isolation:** Cached under `{cache_dir}/edgar/{type}/{SYMBOL}.parquet`. Separate from OHLCV cache.
 - **edgartools Optional:** `pip install -e ".[edgar]"` to enable. All edgartools imports guarded with try/except ImportError.
+- **Alt-Data Column Prefixes:** `vix_` (VIX term structure), `intermarket_` (copper/gold/dollar), `fred_` (macro regime), `yield_` (Treasury curve), `sentiment_` (put-call ratio), `analyst_` (earnings revisions). Mirrors EDGAR `fund_`/`insider_`/`inst_`/`event_` pattern.
+- **Alt-Data Opt-In Flags:** `use_vix`, `use_intermarket`, `use_fred`, `use_yield_curve`, `use_pcr`, `use_analyst` in BacktestConfig. All `False` by default — zero impact on existing behavior.
+- **Alt-Data Auxiliary Merge:** Engine `_merge_auxiliary_data()` reindexes aux data to daily index + forward-fill. No lookahead — data only appears on or after its publication date.
+- **VIX + FRED Engine-Level Regime:** VIX backwardation (ratio > 1.0) and FRED macro score (< 0.5) suppress BUY/SHORT signals via `_is_regime_on()`. `fred_regime_mode` controls "supplement" (AND with SMA) vs "replace" (FRED/VIX only).
+- **fredapi Optional:** `pip install -e ".[fred]"` to enable. `fredapi` import guarded with try/except ImportError. Requires `FRED_API_KEY` env var or `fred_api_key` config.
+- **Analyst Data Point-in-Time Limitation:** yfinance provides current snapshot only, not historical estimates. `AnalystRevisionSource` places values on last date only; all other dates NaN.
+- **Alt-Data Graceful Degradation:** All alt-data strategies (macro_aware_value, sentiment_momentum, risk_regime) check for required columns and return HOLD if absent. Safe to run without alt-data flags.
 
 ## Patterns
 
@@ -88,8 +103,8 @@ CLI parses args --> `BacktestConfig` (frozen) --> `BacktestEngine.run()` --> `Da
 ## Test Approach
 
 ```bash
-pytest tests/ -v                                          # full suite (1116 tests)
-pytest tests/test_e2e.py tests/test_edgar_e2e.py -v       # E2E integration tests (46 tests)
+pytest tests/ -v                                          # full suite (1554 tests)
+pytest tests/test_e2e.py tests/test_edgar_e2e.py tests/test_alt_data_e2e.py -v  # E2E integration tests (148 tests)
 pytest tests/test_portfolio.py::TestPosition::test_sell_fifo -v  # single unit test
 ```
 
@@ -103,6 +118,6 @@ pytest tests/test_portfolio.py::TestPosition::test_sell_fifo -v  # single unit t
 
 **Do not change:** conftest `discover_strategies()` call (registration), `make_price_df` seed=42, `basic_config` defaults, `MockDataSource` inclusive date filtering.
 
-**Coverage gaps:** Multi-timeframe strategies lack end-to-end integration tests with real indicator logic. Tearsheet visual correctness is not tested (only structural HTML checks).
+**Coverage gaps:** Multi-timeframe strategies lack end-to-end integration tests with real indicator logic. Tearsheet visual correctness is not tested (only structural HTML checks). Analyst revision data is snapshot-only (no historical point-in-time).
 
-**Test counts by area:** E2E integration (28), EDGAR E2E (18), fundamental/financial (53), insider (16), institutional (12), strategies (50), short selling (47), metrics (42), limit orders (39), fees extended (34), correlation (26), tearsheet (21), regime (21), multi-strategy (19), signal decay (17), position sizing (17), multi-timeframe (16), portfolio (15), calendar analytics (18), CLI (22), report (12), optimizer (12), stops (11), engine (9), broker (8), activity log (7), universe (7), data (6), slippage (4), Monte Carlo (4), calendar (3).
+**Test counts by area:** E2E integration (69), alt-data E2E (54), EDGAR E2E (25), fundamental/financial (66), insider (24), institutional (23), Piotroski F-Score (32), Altman Z-Score (18), shareholder yield (19), dividend growth (16), VIX term structure (18), intermarket (17), macro regime (22), yield curve (18), put-call ratio (17), earnings revisions (20), strategies (97), short selling (47), metrics (64), limit orders (39), fees extended (34), gap features (64), portfolio (73), broker (42), position sizing (41), correlation (26), tearsheet (21), regime (21), multi-strategy (19), signal decay (17), multi-timeframe (16), stops (16), calendar analytics (26), CLI (63), report (12), optimizer (13), engine (22), data (25), slippage (11), Monte Carlo (10), calendar (18), universe (7), activity log (12), EDGAR utils (33), integration (28), overfitting (26), blackbox (70), TCA (17), stress (13), cross-validation (11), phase1/2/4 coverage (42).

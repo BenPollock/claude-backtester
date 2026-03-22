@@ -10,7 +10,7 @@ Guidance for Claude Code when working in this repo.
 
 - Python 3.11+, setuptools/pyproject.toml, venv
 - Key deps: numpy, pandas, click, yfinance, matplotlib, pyarrow, exchange_calendars
-- Optional deps: edgartools (SEC EDGAR integration — `pip install -e ".[edgar]"`)
+- Optional deps: edgartools (SEC EDGAR integration — `pip install -e ".[edgar]"`), fredapi (FRED macro data — `pip install -e ".[fred]"`)
 
 ## Commands
 
@@ -46,6 +46,10 @@ src/backtester/
     edgar_events.py   — EDGAR 8-K material event signals
     fundamental.py    — EdgarDataManager (unified EDGAR + CSV data manager)
     fundamental_cache.py — Parquet cache for all EDGAR data types
+    market_data.py    — VIX term structure + cross-asset intermarket data (yfinance)
+    fred_source.py    — FRED macro regime + Treasury yield curve (fredapi)
+    sentiment.py      — CBOE equity put-call ratio data
+    analyst.py        — Analyst earnings revisions (yfinance)
   strategies/
     base.py           — Strategy ABC
     registry.py       — Strategy registration/lookup
@@ -57,6 +61,9 @@ src/backtester/
     fundamental_screener.py — Flexible JSON rule-based screening (EDGAR)
     insider_following.py — Follow insider buying/selling signals (EDGAR)
     smart_money.py    — Institutional + insider + fundamental combo (EDGAR)
+    macro_aware_value.py — Macro-aware value: adapts F-Score/P/E thresholds by FRED regime
+    sentiment_momentum.py — Multi-signal sentiment: analyst revisions + insider + SMA
+    risk_regime.py    — Risk regime: VIX + yield curve + credit spread allocation
   execution/
     broker.py         — SimulatedBroker
     slippage.py       — SlippageModel
@@ -78,7 +85,7 @@ src/backtester/
 
 ## Key Design Rules
 
-- **Data flow:** CLI → Engine → DataManager (cache-first) → EdgarDataManager.merge_all_onto_daily (adds `fund_`/`insider_`/`inst_`/`event_` columns) → Strategy.compute_indicators (vectorized) → day-by-day loop: Broker.process_fills → Strategy.generate_signals → Broker.submit_order → Analytics
+- **Data flow:** CLI → Engine → DataManager (cache-first) → EdgarDataManager.merge_all_onto_daily (adds `fund_`/`insider_`/`inst_`/`event_` columns) → Alt-data merge (`_merge_auxiliary_data`: adds `vix_`/`intermarket_`/`fred_`/`yield_`/`sentiment_`/`analyst_` columns) → Strategy.compute_indicators (vectorized) → day-by-day loop: Broker.process_fills → Strategy.generate_signals → Broker.submit_order → Analytics
 - **Lookahead prevention:** Signals use close of day T; orders fill at open of T+1. Strategies only see current row.
 - **Regime filter:** Engine-level — suppresses BUY signals when benchmark SMA condition is "off". Strategies don't handle benchmark logic.
 - **Position sizing:** FIFO lot tracking in `position.py`
@@ -114,11 +121,22 @@ pytest tests/ -v --ignore=tests/test_e2e.py
 
 ```
 tests/
-  test_e2e.py             — E2E integration tests (full pipeline, 28 tests)
-  test_edgar_e2e.py       — EDGAR E2E integration tests (18 tests)
-  test_fundamental.py     — Financial statement unit tests (53 tests)
-  test_insider.py         — Insider trading unit tests (16 tests)
-  test_institutional.py   — 13F institutional unit tests (12 tests)
+  test_e2e.py             — E2E integration tests (full pipeline, 69 tests)
+  test_alt_data_e2e.py    — Alt-data E2E integration tests (54 tests)
+  test_edgar_e2e.py       — EDGAR E2E integration tests (25 tests)
+  test_fundamental.py     — Financial statement unit tests (66 tests)
+  test_insider.py         — Insider trading unit tests (24 tests)
+  test_institutional.py   — 13F institutional unit tests (23 tests)
+  test_piotroski.py       — Piotroski F-Score unit tests (32 tests)
+  test_altman_zscore.py   — Altman Z-Score unit tests (18 tests)
+  test_shareholder_yield.py — Buyback/shareholder yield tests (19 tests)
+  test_dividend_growth.py — Dividend growth tests (16 tests)
+  test_vix_term_structure.py — VIX term structure tests (18 tests)
+  test_intermarket.py     — Cross-asset intermarket tests (17 tests)
+  test_macro_regime.py    — FRED macro regime tests (22 tests)
+  test_yield_curve.py     — Treasury yield curve tests (18 tests)
+  test_put_call_ratio.py  — CBOE put-call ratio tests (17 tests)
+  test_earnings_revisions.py — Analyst revisions tests (20 tests)
   test_portfolio.py       test_broker.py       test_engine.py
   test_strategies.py      test_metrics.py      test_montecarlo.py
   test_data.py            test_calendar.py     test_slippage.py
