@@ -103,3 +103,88 @@ class TestSqrtImpactSlippage:
         order = make_order(Side.BUY, quantity=1000)
         price = model.compute(order, fill_price=50.0, volume=0)
         assert price == 50.0
+
+
+# ---------------------------------------------------------------------------
+# Coverage-expanding tests
+# ---------------------------------------------------------------------------
+
+
+class TestFixedSlippageEdgeCases:
+    """Edge cases for FixedSlippage."""
+
+    def test_zero_bps_returns_original_price(self):
+        """0 bps should return the original fill price unchanged."""
+        model = FixedSlippage(bps=0)
+        buy = make_order(Side.BUY)
+        sell = make_order(Side.SELL)
+        assert model.compute(buy, fill_price=100.0, volume=1_000_000) == 100.0
+        assert model.compute(sell, fill_price=100.0, volume=1_000_000) == 100.0
+
+    def test_zero_fill_price(self):
+        """Fill price of 0 should produce 0 slippage (slip = 0 * bps = 0)."""
+        model = FixedSlippage(bps=100)
+        order = make_order(Side.BUY)
+        price = model.compute(order, fill_price=0.0, volume=1_000_000)
+        assert price == 0.0
+
+    def test_large_bps_buy(self):
+        """Very large bps should produce correspondingly large slippage."""
+        model = FixedSlippage(bps=50_000)  # 500%
+        order = make_order(Side.BUY)
+        price = model.compute(order, fill_price=100.0, volume=1_000_000)
+        # slip = 100 * 5.0 = 500; buy price = 100 + 500 = 600
+        assert price == 600.0
+
+
+class TestVolumeSlippageZeroImpact:
+    """VolumeSlippage with zero impact factor."""
+
+    def test_zero_impact_factor(self):
+        """impact_factor=0 should produce no slippage."""
+        model = VolumeSlippage(impact_factor=0.0)
+        order = make_order(Side.BUY, quantity=1000)
+        price = model.compute(order, fill_price=100.0, volume=10_000)
+        assert price == 100.0
+
+    def test_very_large_order_vs_volume(self):
+        """Order much larger than volume produces large slippage."""
+        model = VolumeSlippage(impact_factor=0.1)
+        order = make_order(Side.BUY, quantity=100_000)
+        price = model.compute(order, fill_price=100.0, volume=1_000)
+        # ratio = 100000/1000 = 100; slip = 100 * 0.1 * 100 = 1000
+        assert price == 1100.0
+
+
+class TestSqrtImpactEdgeCases:
+    """Edge cases for SqrtImpactSlippage."""
+
+    def test_zero_sigma(self):
+        """sigma=0 should produce no impact."""
+        model = SqrtImpactSlippage(sigma=0.0, impact_factor=0.1)
+        order = make_order(Side.BUY, quantity=10_000)
+        price = model.compute(order, fill_price=100.0, volume=1_000_000)
+        assert price == 100.0
+
+    def test_zero_impact_factor(self):
+        """impact_factor=0 should produce no impact."""
+        model = SqrtImpactSlippage(sigma=0.02, impact_factor=0.0)
+        order = make_order(Side.BUY, quantity=10_000)
+        price = model.compute(order, fill_price=100.0, volume=1_000_000)
+        assert price == 100.0
+
+    def test_negative_volume_no_impact(self):
+        """Negative volume should return original price (same as zero)."""
+        model = SqrtImpactSlippage(sigma=0.02, impact_factor=0.1)
+        order = make_order(Side.BUY, quantity=1000)
+        price = model.compute(order, fill_price=50.0, volume=-100)
+        assert price == 50.0
+
+    def test_order_larger_than_volume(self):
+        """Order qty > volume should still compute (sqrt of ratio > 1)."""
+        model = SqrtImpactSlippage(sigma=0.02, impact_factor=0.1)
+        order = make_order(Side.BUY, quantity=10_000)
+        price = model.compute(order, fill_price=100.0, volume=100)
+        # impact = 0.1 * 0.02 * sqrt(10000/100) * 100 = 0.002 * 10 * 100 = 2.0
+        expected = 100.0 + 0.1 * 0.02 * math.sqrt(10_000 / 100) * 100.0
+        assert abs(price - expected) < 1e-10

@@ -1670,3 +1670,343 @@ class TestRiskRegime:
         assert s.yield_spread_threshold == 0.5
         assert s.credit_threshold == 4.0
         assert s.min_f_score == 6
+
+
+# ---------------------------------------------------------------------------
+# MomentumRotation strategy tests
+# ---------------------------------------------------------------------------
+
+class TestMomentumRotation:
+    """Tests for the momentum_rotation cross-sectional strategy."""
+
+    def _make_state(self, cash=100_000.0, positions=None):
+        syms = frozenset(positions.keys()) if positions else frozenset()
+        return PortfolioState(
+            cash=cash,
+            total_equity=100_000.0,
+            num_positions=len(syms),
+            position_symbols=syms,
+        )
+
+    def test_configure_defaults(self):
+        s = get_strategy("momentum_rotation")
+        assert s.roc_period == 63
+        assert s.top_n_count == 3
+
+    def test_configure_overrides(self):
+        s = get_strategy("momentum_rotation")
+        s.configure({"roc_period": 126, "top_n": 5})
+        assert s.roc_period == 126
+        assert s.top_n_count == 5
+
+    def test_compute_indicators_adds_roc(self):
+        s = get_strategy("momentum_rotation")
+        s.configure({"roc_period": 5})
+        df = make_price_df(days=30)
+        result = s.compute_indicators(df)
+        assert "roc" in result.columns
+        # First roc_period values are NaN
+        assert result["roc"].iloc[:5].isna().all()
+        assert result["roc"].iloc[-1:].notna().all()
+
+    def test_compute_indicators_no_mutation(self):
+        s = get_strategy("momentum_rotation")
+        s.configure({"roc_period": 5})
+        df = make_price_df(days=30)
+        original_cols = set(df.columns)
+        s.compute_indicators(df)
+        assert set(df.columns) == original_cols
+
+    def test_generate_signals_always_hold(self):
+        """Per-symbol generate_signals should always return HOLD (cross-sectional logic is in rank_universe)."""
+        s = get_strategy("momentum_rotation")
+        state = self._make_state()
+        row = {"Close": 100.0, "roc": 0.05}
+        assert s.generate_signals("XLK", row, {}, state) == SignalAction.HOLD
+
+    def test_rank_universe_buys_top_n(self):
+        """rank_universe buys top N symbols by ROC."""
+        s = get_strategy("momentum_rotation")
+        s.configure({"top_n": 2})
+        state = self._make_state()
+        bar_data = {
+            "XLK": {"roc": 0.10},
+            "XLF": {"roc": 0.05},
+            "XLE": {"roc": 0.15},
+            "XLV": {"roc": 0.02},
+        }
+        signals = s.rank_universe(bar_data, {}, state)
+        signal_dict = dict(signals)
+        # Top 2 by ROC: XLE (0.15), XLK (0.10)
+        assert signal_dict.get("XLE") == SignalAction.BUY
+        assert signal_dict.get("XLK") == SignalAction.BUY
+        assert "XLF" not in signal_dict
+        assert "XLV" not in signal_dict
+
+    def test_rank_universe_sells_fallen_holdings(self):
+        """rank_universe sells holdings that drop out of top N."""
+        s = get_strategy("momentum_rotation")
+        s.configure({"top_n": 1})
+        # XLF is currently held but has low ROC
+        pos_xlf = Position("XLF")
+        pos_xlf.add_lot(100, 50.0, date(2020, 1, 2))
+        positions = {"XLF": pos_xlf}
+        state = self._make_state(positions=positions)
+        bar_data = {
+            "XLK": {"roc": 0.20},
+            "XLF": {"roc": 0.01},
+        }
+        signals = s.rank_universe(bar_data, positions, state)
+        signal_dict = dict(signals)
+        assert signal_dict.get("XLF") == SignalAction.SELL
+        assert signal_dict.get("XLK") == SignalAction.BUY
+
+    def test_rank_universe_no_action_when_already_held(self):
+        """If a top-N symbol is already held, no BUY signal is generated."""
+        s = get_strategy("momentum_rotation")
+        s.configure({"top_n": 1})
+        pos_xlk = Position("XLK")
+        pos_xlk.add_lot(100, 50.0, date(2020, 1, 2))
+        positions = {"XLK": pos_xlk}
+        state = self._make_state(positions=positions)
+        bar_data = {
+            "XLK": {"roc": 0.20},
+            "XLF": {"roc": 0.01},
+        }
+        signals = s.rank_universe(bar_data, positions, state)
+        signal_dict = dict(signals)
+        # XLK is already held and top 1 → no signal
+        assert "XLK" not in signal_dict
+
+    def test_rank_universe_nan_roc_excluded(self):
+        """Symbols with NaN ROC are excluded from ranking."""
+        s = get_strategy("momentum_rotation")
+        s.configure({"top_n": 2})
+        state = self._make_state()
+        bar_data = {
+            "XLK": {"roc": float("nan")},
+            "XLF": {"roc": 0.05},
+            "XLE": {"roc": 0.10},
+        }
+        signals = s.rank_universe(bar_data, {}, state)
+        signal_dict = dict(signals)
+        assert signal_dict.get("XLE") == SignalAction.BUY
+        assert signal_dict.get("XLF") == SignalAction.BUY
+        assert "XLK" not in signal_dict
+
+    def test_rank_universe_empty_bar_data(self):
+        """Empty bar_data → no signals."""
+        s = get_strategy("momentum_rotation")
+        state = self._make_state()
+        signals = s.rank_universe({}, {}, state)
+        assert signals == []
+
+    def test_size_order_sell_returns_sentinel(self):
+        """size_order returns -1 for SELL."""
+        s = get_strategy("momentum_rotation")
+        state = self._make_state()
+        qty = s.size_order("XLK", SignalAction.SELL, {}, {}, state)
+        assert qty == -1
+
+    def test_size_order_buy_returns_zero(self):
+        """size_order returns 0 for BUY (defers to sizer)."""
+        s = get_strategy("momentum_rotation")
+        state = self._make_state()
+        qty = s.size_order("XLK", SignalAction.BUY, {}, {}, state)
+        assert qty == 0
+
+
+# ---------------------------------------------------------------------------
+# MultiTimeframeTrend strategy tests
+# ---------------------------------------------------------------------------
+
+class TestMultiTimeframeTrend:
+    """Tests for the multi_tf_trend weekly-trend + daily-RSI strategy."""
+
+    def _make_state(self, has_position=False, symbol="TEST"):
+        syms = frozenset({symbol}) if has_position else frozenset()
+        return PortfolioState(
+            cash=100_000.0,
+            total_equity=100_000.0,
+            num_positions=1 if has_position else 0,
+            position_symbols=syms,
+        )
+
+    def test_configure_defaults(self):
+        s = get_strategy("multi_tf_trend")
+        assert s.weekly_fast == 10
+        assert s.weekly_slow == 40
+        assert s.daily_rsi_period == 14
+        assert s.rsi_entry == 40
+        assert s.rsi_exit == 70
+
+    def test_configure_overrides(self):
+        s = get_strategy("multi_tf_trend")
+        s.configure({
+            "weekly_fast": 5,
+            "weekly_slow": 20,
+            "daily_rsi_period": 7,
+            "rsi_entry": 30,
+            "rsi_exit": 80,
+        })
+        assert s.weekly_fast == 5
+        assert s.weekly_slow == 20
+        assert s.daily_rsi_period == 7
+        assert s.rsi_entry == 30
+        assert s.rsi_exit == 80
+
+    def test_timeframes_property(self):
+        s = get_strategy("multi_tf_trend")
+        assert s.timeframes == ["weekly"]
+
+    def test_compute_indicators_daily_rsi(self):
+        """compute_indicators adds daily_rsi column."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"daily_rsi_period": 5})
+        df = make_price_df(days=30)
+        result = s.compute_indicators(df)
+        assert "daily_rsi" in result.columns
+        valid = result["daily_rsi"].dropna()
+        assert len(valid) > 0
+        assert (valid >= 0).all() and (valid <= 100).all()
+
+    def test_compute_indicators_with_weekly_close(self):
+        """compute_indicators computes weekly SMAs from weekly_Close column."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"weekly_fast": 3, "weekly_slow": 5, "daily_rsi_period": 5})
+        df = make_price_df(days=50)
+        # Simulate engine-merged weekly Close
+        df["weekly_Close"] = df["Close"] * 1.01
+        result = s.compute_indicators(df)
+        assert "weekly_sma_fast" in result.columns
+        assert "weekly_sma_slow" in result.columns
+
+    def test_compute_indicators_with_timeframe_data(self):
+        """compute_indicators uses timeframe_data dict for weekly data."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"weekly_fast": 3, "weekly_slow": 5, "daily_rsi_period": 5})
+        daily_df = make_price_df(days=50)
+        weekly_df = daily_df.iloc[::5].copy()  # Simulated weekly
+        result = s.compute_indicators(daily_df, timeframe_data={"weekly": weekly_df})
+        assert "daily_rsi" in result.columns
+        assert "weekly_sma_fast" in result.columns
+
+    def test_compute_indicators_no_mutation(self):
+        s = get_strategy("multi_tf_trend")
+        s.configure({"daily_rsi_period": 5})
+        df = make_price_df(days=30)
+        original_cols = set(df.columns)
+        s.compute_indicators(df)
+        assert set(df.columns) == original_cols
+
+    def test_buy_signal_uptrend_and_low_rsi(self):
+        """BUY when weekly uptrend and daily RSI below entry threshold."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"rsi_entry": 40, "rsi_exit": 70})
+        state = self._make_state(has_position=False)
+        row = {
+            "daily_rsi": 30.0,           # Below entry threshold
+            "weekly_sma_fast": 110.0,     # Fast > Slow = uptrend
+            "weekly_sma_slow": 100.0,
+            "Close": 105.0,
+        }
+        signal = s.generate_signals("TEST", row, {}, state)
+        assert signal == SignalAction.BUY
+
+    def test_sell_signal_high_rsi(self):
+        """SELL when daily RSI exceeds exit threshold and has position."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"rsi_entry": 40, "rsi_exit": 70})
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        state = self._make_state(has_position=True)
+        row = {
+            "daily_rsi": 75.0,           # Above exit threshold
+            "weekly_sma_fast": 110.0,
+            "weekly_sma_slow": 100.0,
+            "Close": 105.0,
+        }
+        signal = s.generate_signals("TEST", row, {"TEST": pos}, state)
+        assert signal == SignalAction.SELL
+
+    def test_hold_in_downtrend(self):
+        """HOLD when weekly downtrend even with low RSI."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"rsi_entry": 40, "rsi_exit": 70})
+        state = self._make_state(has_position=False)
+        row = {
+            "daily_rsi": 30.0,           # Low RSI
+            "weekly_sma_fast": 90.0,      # Fast < Slow = downtrend
+            "weekly_sma_slow": 100.0,
+            "Close": 95.0,
+        }
+        signal = s.generate_signals("TEST", row, {}, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_when_rsi_between_thresholds(self):
+        """HOLD when RSI is between entry and exit thresholds."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"rsi_entry": 40, "rsi_exit": 70})
+        state = self._make_state(has_position=False)
+        row = {
+            "daily_rsi": 55.0,           # Between 40 and 70
+            "weekly_sma_fast": 110.0,
+            "weekly_sma_slow": 100.0,
+            "Close": 105.0,
+        }
+        signal = s.generate_signals("TEST", row, {}, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_when_indicators_missing(self):
+        """HOLD when weekly SMA indicators are None."""
+        s = get_strategy("multi_tf_trend")
+        state = self._make_state(has_position=False)
+        row = {
+            "daily_rsi": 30.0,
+            "weekly_sma_fast": None,
+            "weekly_sma_slow": None,
+            "Close": 100.0,
+        }
+        signal = s.generate_signals("TEST", row, {}, state)
+        assert signal == SignalAction.HOLD
+
+    def test_hold_when_rsi_nan(self):
+        """HOLD when daily RSI is NaN."""
+        s = get_strategy("multi_tf_trend")
+        state = self._make_state(has_position=False)
+        row = {
+            "daily_rsi": float("nan"),
+            "weekly_sma_fast": 110.0,
+            "weekly_sma_slow": 100.0,
+            "Close": 100.0,
+        }
+        signal = s.generate_signals("TEST", row, {}, state)
+        assert signal == SignalAction.HOLD
+
+    def test_no_buy_when_already_positioned(self):
+        """No BUY signal when position already exists."""
+        s = get_strategy("multi_tf_trend")
+        s.configure({"rsi_entry": 40, "rsi_exit": 70})
+        pos = Position("TEST")
+        pos.add_lot(100, 90.0, date(2020, 1, 2))
+        state = self._make_state(has_position=True)
+        row = {
+            "daily_rsi": 30.0,
+            "weekly_sma_fast": 110.0,
+            "weekly_sma_slow": 100.0,
+            "Close": 105.0,
+        }
+        signal = s.generate_signals("TEST", row, {"TEST": pos}, state)
+        assert signal == SignalAction.HOLD
+
+    def test_size_order_sell_returns_sentinel(self):
+        s = get_strategy("multi_tf_trend")
+        state = self._make_state()
+        qty = s.size_order("TEST", SignalAction.SELL, {}, {}, state)
+        assert qty == -1
+
+    def test_size_order_buy_returns_zero(self):
+        s = get_strategy("multi_tf_trend")
+        state = self._make_state()
+        qty = s.size_order("TEST", SignalAction.BUY, {}, {}, state)
+        assert qty == 0

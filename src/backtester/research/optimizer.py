@@ -116,7 +116,16 @@ def grid_search(
             else:
                 best_idx = valid[optimize_metric].idxmin()
             best_row = valid.loc[best_idx]
-            best_params = {k: best_row[k] for k in param_names}
+            best_params = {}
+            for k in param_names:
+                v = best_row[k]
+                # Convert numpy scalars to Python types
+                if hasattr(v, 'item'):
+                    v = v.item()
+                # Convert float-valued integers back to int (e.g. 20.0 -> 20)
+                if isinstance(v, float) and v == int(v):
+                    v = int(v)
+                best_params[k] = v
             best_val = best_row[optimize_metric]
         else:
             best_params, best_val = {}, 0.0

@@ -35,6 +35,8 @@ class MarketDataManager:
             try:
                 df = pd.read_parquet(cache_path)
                 if not df.empty:
+                    if hasattr(df.index, "tz") and df.index.tz is not None:
+                        df.index = df.index.tz_localize(None)
                     return df["Close"]
             except Exception:
                 logger.warning("Failed to read cache for %s", ticker)
@@ -43,6 +45,8 @@ class MarketDataManager:
         try:
             data = yf.download(ticker, start=str(start), end=str(end), progress=False)
             if data is not None and not data.empty:
+                if hasattr(data.index, "tz") and data.index.tz is not None:
+                    data.index = data.index.tz_localize(None)
                 close = data["Close"]
                 # Save to cache
                 if cache_path:

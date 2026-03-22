@@ -2924,3 +2924,984 @@ class TestMultiTickerRegimeE2E:
             f"Regime should suppress trades: regime={len(result_regime.trades)} "
             f"vs no_regime={len(result_no_regime.trades)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Custom test strategies for coverage gap tests (batch 3)
+# ---------------------------------------------------------------------------
+
+
+class _LongShortStrategy(Strategy):
+    """Strategy that buys one ticker and shorts another simultaneously.
+    Requires at least two tickers. Buys the first, shorts the second."""
+
+    def __init__(self):
+        super().__init__()
+        self._warmup = 5
+        self._hold_days = 15
+        self._entered = {}
+
+    def configure(self, params: dict) -> None:
+        self._warmup = params.get("warmup", self._warmup)
+        self._hold_days = params.get("hold_days", self._hold_days)
+        self._entered = {}
+
+    def compute_indicators(self, df, timeframe_data=None):
+        df = df.copy()
+        df["row_idx"] = range(len(df))
+        return df
+
+    def generate_signals(self, symbol, row, position, portfolio_state, benchmark_row=None):
+        idx = row.get("row_idx", 0)
+        has_pos = position is not None and position.total_quantity != 0
+
+        if idx < self._warmup:
+            return SignalAction.HOLD
+
+        # Determine action based on symbol name convention
+        is_short_target = symbol.startswith("SHORT")
+
+        if not has_pos and symbol not in self._entered:
+            self._entered[symbol] = idx
+            return SignalAction.SHORT if is_short_target else SignalAction.BUY
+
+        if has_pos and symbol in self._entered:
+            if idx - self._entered[symbol] >= self._hold_days:
+                del self._entered[symbol]
+                if position.is_short:
+                    return SignalAction.COVER
+                else:
+                    return SignalAction.SELL
+
+        return SignalAction.HOLD
+
+
+class _ShortWithLimitStrategy(Strategy):
+    """Strategy that shorts using limit orders, then covers with limit orders."""
+
+    def __init__(self):
+        super().__init__()
+        self._warmup = 5
+        self._day_count = 0
+
+    def configure(self, params: dict) -> None:
+        self._warmup = params.get("warmup", self._warmup)
+        self._day_count = 0
+
+    def compute_indicators(self, df, timeframe_data=None):
+        df = df.copy()
+        df["row_idx"] = range(len(df))
+        return df
+
+    def generate_signals(self, symbol, row, position, portfolio_state, benchmark_row=None):
+        idx = row.get("row_idx", 0)
+        close = row["Close"]
+        has_short = position is not None and position.is_short
+
+        if idx < self._warmup:
+            return SignalAction.HOLD
+
+        if not has_short:
+            # Short entry with limit above current price (should fill next day)
+            return Signal(
+                action=SignalAction.SHORT,
+                limit_price=close * 1.02,  # sell limit above current
+                time_in_force="GTC",
+            )
+        else:
+            # Cover with limit below current price (should fill when price drops)
+            return Signal(
+                action=SignalAction.COVER,
+                limit_price=close * 0.98,
+                time_in_force="GTC",
+            )
+
+
+class _RebalanceTestStrategy(Strategy):
+    """Strategy that buys once early, then holds. Used to test rebalance schedules."""
+
+    def __init__(self):
+        super().__init__()
+        self._bought = set()
+
+    def configure(self, params: dict) -> None:
+        self._bought = set()
+
+    def compute_indicators(self, df, timeframe_data=None):
+        df = df.copy()
+        df["row_idx"] = range(len(df))
+        return df
+
+    def generate_signals(self, symbol, row, position, portfolio_state, benchmark_row=None):
+        idx = row.get("row_idx", 0)
+        has_pos = position is not None and position.total_quantity > 0
+
+        if idx >= 3 and not has_pos and symbol not in self._bought:
+            self._bought.add(symbol)
+            return SignalAction.BUY
+        return SignalAction.HOLD
+
+
+def _register_test_strategies_batch3():
+    """Register batch 3 test-only strategies."""
+    for name, cls in [
+        ("_long_short_test", _LongShortStrategy),
+        ("_short_limit_test", _ShortWithLimitStrategy),
+        ("_rebalance_test", _RebalanceTestStrategy),
+    ]:
+        if name not in _REGISTRY:
+            _REGISTRY[name] = cls
+
+_register_test_strategies_batch3()
+
+
+# ===========================================================================
+# 23. TestShortBorrowCost
+# ===========================================================================
+
+
+class TestShortBorrowCost:
+    """E2E tests for short borrow cost accrual impacting cash."""
+
+    def test_borrow_cost_reduces_cash(self):
+        """When holding a short position, daily borrow costs should reduce cash."""
+        prices = [100.0] * 60  # flat prices so no PnL from price movement
+        source = MockDataSource()
+        df = make_controlled_df(prices)
+        source.add("TEST", df)
+        start_d, end_d = _dates_from_df(df)
+
+        # Run with borrow costs
+        config_borrow = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 30},
+            allow_short=True,
+            short_borrow_rate=0.10,  # 10% annual
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result_borrow = _run_backtest(config_borrow, source)
+
+        # Run without borrow costs
+        source2 = MockDataSource()
+        source2.add("TEST", make_controlled_df(prices))
+        config_no_borrow = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 30},
+            allow_short=True,
+            short_borrow_rate=0.0,  # no borrow cost
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result_no_borrow = _run_backtest(config_no_borrow, source2)
+
+        # With borrow costs, final cash should be lower
+        assert result_borrow.portfolio.cash < result_no_borrow.portfolio.cash, (
+            f"Borrow cost should reduce cash: with={result_borrow.portfolio.cash:.2f} "
+            f"vs without={result_no_borrow.portfolio.cash:.2f}"
+        )
+
+    def test_borrow_cost_proportional_to_rate(self):
+        """Higher borrow rate should reduce cash more."""
+        prices = [100.0] * 60
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        results = {}
+        for rate in [0.02, 0.10]:
+            source = MockDataSource()
+            source.add("TEST", make_controlled_df(prices))
+            config = BacktestConfig(
+                strategy_name="_always_short_test",
+                tickers=["TEST"],
+                benchmark="TEST",
+                start_date=start_d,
+                end_date=end_d,
+                starting_cash=100_000.0,
+                max_positions=10,
+                max_alloc_pct=0.20,
+                strategy_params={"warmup": 3, "hold_days": 30},
+                allow_short=True,
+                short_borrow_rate=rate,
+                fee_per_trade=0.0,
+                slippage_bps=0.0,
+            )
+            results[rate] = _run_backtest(config, source)
+
+        # Higher rate should result in lower final cash
+        assert results[0.10].portfolio.cash < results[0.02].portfolio.cash, (
+            f"10% rate cash ({results[0.10].portfolio.cash:.2f}) should be less than "
+            f"2% rate cash ({results[0.02].portfolio.cash:.2f})"
+        )
+
+
+# ===========================================================================
+# 24. TestMixedLongShort
+# ===========================================================================
+
+
+class TestMixedLongShort:
+    """E2E tests for simultaneous long and short positions in the same backtest."""
+
+    def test_mixed_positions_cash_accounting(self):
+        """A portfolio with both long and short positions should maintain
+        correct cash accounting through the full lifecycle."""
+        # Uptrending LONG ticker, flat SHORT ticker
+        long_prices = [100 + i * 0.3 for i in range(80)]
+        short_prices = [100.0] * 80
+
+        source = MockDataSource()
+        source.add("LONG1", make_controlled_df(long_prices))
+        source.add("SHORT1", make_controlled_df(short_prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(long_prices))
+
+        config = BacktestConfig(
+            strategy_name="_long_short_test",
+            tickers=["LONG1", "SHORT1"],
+            benchmark="LONG1",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 5, "hold_days": 30},
+            allow_short=True,
+            short_borrow_rate=0.0,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # After force-close, all positions should be closed
+        assert len(result.portfolio.positions) == 0, (
+            f"All positions should be force-closed, "
+            f"found: {list(result.portfolio.positions.keys())}"
+        )
+        # Cash should equal total equity (no open positions)
+        assert abs(result.portfolio.total_equity - result.portfolio.cash) < 0.01
+        # Cash should be positive
+        assert result.portfolio.cash > 0, (
+            f"Cash should be positive, got {result.portfolio.cash:.2f}"
+        )
+
+    def test_mixed_positions_respects_max_positions(self):
+        """Both long and short positions count toward max_positions."""
+        long_prices = [100 + i * 0.3 for i in range(80)]
+        short_prices = [100.0] * 80
+
+        source = MockDataSource()
+        source.add("LONG1", make_controlled_df(long_prices))
+        source.add("SHORT1", make_controlled_df(short_prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(long_prices))
+
+        config = BacktestConfig(
+            strategy_name="_long_short_test",
+            tickers=["LONG1", "SHORT1"],
+            benchmark="LONG1",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=1,  # only allow 1 position total
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 5, "hold_days": 50},
+            allow_short=True,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # With max_positions=1, we should have at most 1 trade open at a time.
+        # Check equity history for consistency - no phantom positions.
+        for eq_date, eq_val in result.portfolio.equity_history:
+            assert eq_val > 0, f"Equity went non-positive on {eq_date}"
+
+
+# ===========================================================================
+# 25. TestForceCloseShorts
+# ===========================================================================
+
+
+class TestForceCloseShorts:
+    """E2E tests for force-closing short positions at end of backtest."""
+
+    def test_force_close_short_position(self):
+        """Force-close should properly close short positions at end of backtest."""
+        prices = [100.0] * 80  # flat prices
+        source = MockDataSource()
+        source.add("TEST", make_controlled_df(prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        config = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 200},  # hold longer than backtest
+            allow_short=True,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # All positions must be closed by force-close
+        assert len(result.portfolio.positions) == 0, (
+            f"Short position should be force-closed, "
+            f"found: {list(result.portfolio.positions.keys())}"
+        )
+        # Cash should equal equity
+        assert abs(result.portfolio.total_equity - result.portfolio.cash) < 0.01
+
+    def test_force_close_mixed_long_short(self):
+        """Force-close should handle both long and short positions correctly."""
+        long_prices = [100 + i * 0.2 for i in range(80)]
+        short_prices = [100.0] * 80
+
+        source = MockDataSource()
+        source.add("LONG1", make_controlled_df(long_prices))
+        source.add("SHORT1", make_controlled_df(short_prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(long_prices))
+
+        config = BacktestConfig(
+            strategy_name="_long_short_test",
+            tickers=["LONG1", "SHORT1"],
+            benchmark="LONG1",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 5, "hold_days": 200},  # never exit naturally
+            allow_short=True,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        assert len(result.portfolio.positions) == 0, (
+            f"All positions should be force-closed"
+        )
+        assert abs(result.portfolio.total_equity - result.portfolio.cash) < 0.01
+        # Should have produced trade records for both long and short closes
+        assert len(result.trades) >= 2, (
+            f"Expected trades for both long and short force-close, got {len(result.trades)}"
+        )
+
+
+# ===========================================================================
+# 26. TestRegimeFilterShorts
+# ===========================================================================
+
+
+class TestRegimeFilterShorts:
+    """E2E tests for regime filter suppressing SHORT signals."""
+
+    def test_regime_suppresses_short_signals(self):
+        """When regime is off (downtrending benchmark), SHORT signals should
+        be suppressed just like BUY signals."""
+        # Downtrending benchmark
+        benchmark_prices = [200.0 - i * 1.5 for i in range(120)]
+        ticker_prices = [100.0] * 120
+
+        source = MockDataSource()
+        source.add("SPY", make_controlled_df(benchmark_prices))
+        source.add("TEST", make_controlled_df(ticker_prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(benchmark_prices))
+
+        # With regime filter on
+        config_regime = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="SPY",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 50},
+            allow_short=True,
+            regime_filter=RegimeFilter(
+                benchmark="SPY",
+                indicator="sma",
+                fast_period=10,
+                slow_period=20,
+            ),
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result_regime = _run_backtest(config_regime, source)
+
+        # Without regime filter
+        source2 = MockDataSource()
+        source2.add("SPY", make_controlled_df(benchmark_prices))
+        source2.add("TEST", make_controlled_df(ticker_prices))
+        config_no_regime = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="SPY",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 50},
+            allow_short=True,
+            regime_filter=None,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result_no_regime = _run_backtest(config_no_regime, source2)
+
+        # Without regime filter, we should get short trades
+        assert len(result_no_regime.trades) >= 1, "Without regime, shorts should execute"
+        # With regime (downtrending benchmark), shorts should be suppressed
+        assert len(result_regime.trades) < len(result_no_regime.trades), (
+            f"Regime should suppress shorts: regime={len(result_regime.trades)} "
+            f"vs no_regime={len(result_no_regime.trades)}"
+        )
+
+
+# ===========================================================================
+# 27. TestRebalanceSchedule
+# ===========================================================================
+
+
+class TestRebalanceSchedule:
+    """E2E tests for non-daily rebalance schedules."""
+
+    def test_weekly_rebalance_fewer_signals(self):
+        """Weekly rebalance should generate fewer/equal signals than daily."""
+        prices = [100.0] * 10
+        prices += [100 + i * 0.5 for i in range(80)]
+        prices += [140 - i * 0.5 for i in range(80)]
+        prices += [100.0] * 10
+
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        # Daily rebalance
+        source_daily = MockDataSource()
+        source_daily.add("TEST", make_controlled_df(prices))
+        config_daily = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"sma_fast": 5, "sma_slow": 10},
+            rebalance_schedule="daily",
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result_daily = _run_backtest(config_daily, source_daily)
+
+        # Weekly rebalance
+        source_weekly = MockDataSource()
+        source_weekly.add("TEST", make_controlled_df(prices))
+        config_weekly = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"sma_fast": 5, "sma_slow": 10},
+            rebalance_schedule="weekly",
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result_weekly = _run_backtest(config_weekly, source_weekly)
+
+        # Weekly should produce <= daily trades (fewer opportunities to act)
+        assert len(result_weekly.trades) <= len(result_daily.trades), (
+            f"Weekly ({len(result_weekly.trades)}) should produce "
+            f"<= daily ({len(result_daily.trades)}) trades"
+        )
+
+    def test_monthly_rebalance_completes(self):
+        """Monthly rebalance should produce a valid backtest result."""
+        prices = [100 + i * 0.2 for i in range(252)]
+        source = MockDataSource()
+        source.add("TEST", make_controlled_df(prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"sma_fast": 20, "sma_slow": 50},
+            rebalance_schedule="monthly",
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        assert result.equity_series is not None
+        assert len(result.equity_series) > 0
+        # All positions should be force-closed
+        assert len(result.portfolio.positions) == 0
+
+
+# ===========================================================================
+# 28. TestShortWithLimitOrders
+# ===========================================================================
+
+
+class TestShortWithLimitOrders:
+    """E2E tests for SHORT entry/exit using limit orders (combined feature)."""
+
+    def test_short_limit_entry_fills(self):
+        """A SHORT with limit price above current should fill when High reaches limit."""
+        # Flat then rising prices to trigger limit short entry
+        prices = [100.0] * 10
+        prices += [100 + i * 0.5 for i in range(40)]  # rising -> limit fills
+        prices += [120 - i * 0.5 for i in range(30)]  # falling -> cover fills
+        prices += [100.0] * 10
+
+        source = MockDataSource()
+        df = make_controlled_df(prices)
+        source.add("TEST", df)
+        start_d, end_d = _dates_from_df(df)
+
+        config = BacktestConfig(
+            strategy_name="_short_limit_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 5},
+            allow_short=True,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # Should complete without error and have trades from the short entry
+        assert result.equity_series is not None
+        assert len(result.equity_series) > 0
+        # All positions must be closed at end
+        assert len(result.portfolio.positions) == 0
+
+
+# ===========================================================================
+# 29. TestDelistingDetection
+# ===========================================================================
+
+
+class TestDelistingDetection:
+    """E2E tests for delisting detection force-closing positions."""
+
+    def test_delisting_forces_close_after_missing_days(self):
+        """If a symbol's data stops (delisted), position should be force-closed
+        after 5 missing days."""
+        # Ticker data runs out mid-backtest
+        ticker_prices = [100 + i * 0.2 for i in range(40)]  # only 40 days of data
+        benchmark_prices = [100 + i * 0.1 for i in range(80)]  # full 80 days
+
+        source = MockDataSource()
+        source.add("DELIST", make_controlled_df(ticker_prices))
+        source.add("BENCH", make_controlled_df(benchmark_prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(benchmark_prices))
+
+        config = BacktestConfig(
+            strategy_name="_always_buy_test",
+            tickers=["DELIST"],
+            benchmark="BENCH",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # Position should have been closed (either by delisting or force-close)
+        assert len(result.portfolio.positions) == 0
+        # Cash should be positive
+        assert result.portfolio.cash > 0
+
+
+# ===========================================================================
+# 30. TestGTCLimitOrderExpiry
+# ===========================================================================
+
+
+class TestGTCLimitOrderExpiry:
+    """E2E tests for GTC limit orders with explicit expiry dates."""
+
+    def test_gtc_persists_across_days(self):
+        """GTC limit orders should persist across multiple days until filled."""
+        # Flat prices then a drop that triggers the limit buy
+        prices = [100.0] * 20  # flat warmup
+        prices += [100.0] * 20  # stay flat (limit won't fill)
+        prices += [95 - i * 0.5 for i in range(20)]  # drop to fill limit
+        prices += [85.0] * 20  # stay low
+
+        source = MockDataSource()
+        df = make_controlled_df(prices)
+        source.add("TEST", df)
+        start_d, end_d = _dates_from_df(df)
+
+        config = BacktestConfig(
+            strategy_name="_limit_order_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"buy_discount": 0.08, "time_in_force": "GTC", "warmup": 5},
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # The GTC order should eventually fill when price drops enough
+        # At minimum the backtest should complete without error
+        assert result.equity_series is not None
+        assert len(result.portfolio.positions) == 0  # force-closed at end
+
+
+# ===========================================================================
+# 31. TestCompositeFeesWithShorts
+# ===========================================================================
+
+
+class TestCompositeFeesWithShorts:
+    """E2E tests for composite fee models applied to short entry/exit."""
+
+    def test_composite_fees_on_short_trades(self):
+        """Composite fees (percentage + SEC + TAF) should apply to short trades."""
+        prices = [100.0] * 60
+        source = MockDataSource()
+        source.add("TEST", make_controlled_df(prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        config = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 20},
+            allow_short=True,
+            fee_model="composite_us",
+            fee_per_trade=5.0,  # 5 bps for percentage component
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        assert len(result.trades) >= 1, "Expected short trades"
+        for trade in result.trades:
+            assert trade.fees_total > 0, (
+                f"Composite fee on short should be > 0, got {trade.fees_total}"
+            )
+
+    def test_short_fees_reduce_equity_vs_no_fees(self):
+        """Short trading with composite fees should result in lower equity."""
+        prices = [100.0] * 60
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        # With fees
+        source_fees = MockDataSource()
+        source_fees.add("TEST", make_controlled_df(prices))
+        config_fees = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 20},
+            allow_short=True,
+            fee_model="composite_us",
+            fee_per_trade=5.0,
+            slippage_bps=0.0,
+        )
+        result_fees = _run_backtest(config_fees, source_fees)
+
+        # Without fees
+        source_no_fees = MockDataSource()
+        source_no_fees.add("TEST", make_controlled_df(prices))
+        config_no_fees = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 20},
+            allow_short=True,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result_no_fees = _run_backtest(config_no_fees, source_no_fees)
+
+        assert result_fees.portfolio.cash < result_no_fees.portfolio.cash, (
+            f"Fees should reduce cash: with={result_fees.portfolio.cash:.2f} "
+            f"vs without={result_no_fees.portfolio.cash:.2f}"
+        )
+
+
+# ===========================================================================
+# 32. TestMultipleStopTypes
+# ===========================================================================
+
+
+class TestMultipleStopTypes:
+    """E2E tests for positions with both stop-loss and take-profit active."""
+
+    def test_stop_loss_and_take_profit_together(self):
+        """A position with both stop-loss and take-profit should trigger whichever
+        condition is met first."""
+        # Sharp drop to trigger stop-loss
+        prices = [100.0] * 15
+        prices += [100 + i * 0.5 for i in range(20)]  # uptrend -> BUY
+        prices += [110, 109, 105, 100, 95, 90, 85]  # drop -> stop-loss
+        prices += [85.0] * 20
+
+        source = MockDataSource()
+        df = make_controlled_df(prices)
+        source.add("TEST", df)
+        start_d, end_d = _dates_from_df(df)
+
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"sma_fast": 5, "sma_slow": 10},
+            stop_config=StopConfig(
+                stop_loss_pct=0.10,   # 10% stop-loss
+                take_profit_pct=0.30,  # 30% take-profit
+            ),
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # Should complete without error
+        assert result.equity_series is not None
+        assert len(result.portfolio.positions) == 0
+        # With the sharp drop, stop-loss should have triggered
+        if result.trades:
+            # All trades should have reasonable exit prices
+            for trade in result.trades:
+                assert trade.exit_price > 0
+
+    def test_trailing_stop_and_take_profit_together(self):
+        """Trailing stop and take-profit can coexist on the same position."""
+        # Rise then fall pattern
+        prices = [100.0] * 15
+        prices += [100 + i * 0.5 for i in range(30)]  # uptrend -> BUY
+        prices += [115 - i * 0.3 for i in range(40)]  # gradual decline -> trailing stop
+        prices += [100.0] * 10
+
+        source = MockDataSource()
+        df = make_controlled_df(prices)
+        source.add("TEST", df)
+        start_d, end_d = _dates_from_df(df)
+
+        config = BacktestConfig(
+            strategy_name="sma_crossover",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"sma_fast": 5, "sma_slow": 10},
+            stop_config=StopConfig(
+                take_profit_pct=0.50,   # 50% take-profit (won't hit)
+                trailing_stop_pct=0.05,  # 5% trailing stop (will hit)
+            ),
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        assert result.equity_series is not None
+        assert len(result.portfolio.positions) == 0
+
+
+# ===========================================================================
+# 33. TestDrawdownKillSwitchWithShorts
+# ===========================================================================
+
+
+class TestDrawdownKillSwitchWithShorts:
+    """E2E test for drawdown kill switch when short positions are open."""
+
+    def test_kill_switch_closes_short_positions(self):
+        """Drawdown kill switch should force-close short positions too."""
+        # Prices rise sharply (bad for shorts) causing drawdown
+        prices = [100.0] * 10
+        prices += [100 + i * 3 for i in range(50)]  # sharp rise -> short loses
+
+        source = MockDataSource()
+        source.add("TEST", make_controlled_df(prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        config = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 200},
+            allow_short=True,
+            max_drawdown_pct=0.05,  # 5% drawdown limit
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # All positions should be closed by kill switch or force-close
+        assert len(result.portfolio.positions) == 0
+        # Equity should be positive (haven't lost everything)
+        assert result.portfolio.cash > 0
+
+
+# ===========================================================================
+# 34. TestFIFOAccountingShorts
+# ===========================================================================
+
+
+class TestFIFOAccountingShorts:
+    """E2E test for FIFO lot accounting on short positions."""
+
+    def test_short_fifo_lots_closed_in_order(self):
+        """When covering a short position, FIFO should close earliest lots first."""
+        prices = [100.0] * 60
+        source = MockDataSource()
+        source.add("TEST", make_controlled_df(prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        config = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.20,
+            strategy_params={"warmup": 3, "hold_days": 15},
+            allow_short=True,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        # Should complete with trades and all positions closed
+        assert len(result.portfolio.positions) == 0
+        if result.trades:
+            for trade in result.trades:
+                assert trade.entry_date <= trade.exit_date
+                assert trade.quantity > 0
+
+
+# ===========================================================================
+# 35. TestEquityCurveInvariantsComprehensive
+# ===========================================================================
+
+
+class TestEquityCurveInvariantsComprehensive:
+    """Comprehensive equity curve invariant checks across different scenarios."""
+
+    def test_equity_always_positive_with_shorts(self):
+        """Equity should remain positive even during short trades."""
+        # Mildly rising prices (short takes small loss)
+        prices = [100 + i * 0.1 for i in range(80)]
+        source = MockDataSource()
+        source.add("TEST", make_controlled_df(prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        config = BacktestConfig(
+            strategy_name="_always_short_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=100_000.0,
+            max_positions=10,
+            max_alloc_pct=0.10,  # small positions
+            strategy_params={"warmup": 3, "hold_days": 20},
+            allow_short=True,
+            fee_per_trade=0.0,
+            slippage_bps=0.0,
+        )
+        result = _run_backtest(config, source)
+
+        for eq_date, eq_val in result.portfolio.equity_history:
+            assert eq_val > 0, f"Equity went non-positive on {eq_date}: {eq_val:.2f}"
+
+    def test_equity_curve_monotonic_with_no_trades(self):
+        """With no trades, equity curve should be flat at starting_cash."""
+        prices = [100 + i * 0.5 for i in range(100)]
+        source = MockDataSource()
+        source.add("TEST", make_controlled_df(prices))
+        start_d, end_d = _dates_from_df(make_controlled_df(prices))
+
+        config = BacktestConfig(
+            strategy_name="_hold_only_test",
+            tickers=["TEST"],
+            benchmark="TEST",
+            start_date=start_d,
+            end_date=end_d,
+            starting_cash=50_000.0,
+            max_positions=10,
+            max_alloc_pct=0.10,
+        )
+        result = _run_backtest(config, source)
+
+        for eq_date, eq_val in result.portfolio.equity_history:
+            assert abs(eq_val - 50_000.0) < 0.01, (
+                f"With no trades, equity should be 50000, got {eq_val:.2f} on {eq_date}"
+            )

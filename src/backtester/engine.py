@@ -80,6 +80,7 @@ class BacktestEngine:
             max_volume_pct=config.max_volume_pct,
             partial_fill_policy=config.partial_fill_policy,
             fill_price_model=config.fill_price_model,
+            lot_method=config.lot_method,
         )
         self._stop_mgr = StopManager(config.stop_config, fees, lot_method=config.lot_method)
 
@@ -735,6 +736,7 @@ class BacktestEngine:
 
     def _check_delistings(self, day, today_data, portfolio) -> None:
         """Gap 2: Force-close positions for delisted symbols (absent >5 days)."""
+        lot_method = self.config.lot_method
         for symbol in list(portfolio.positions.keys()):
             if symbol in today_data:
                 self._missing_days[symbol] = 0
@@ -753,7 +755,14 @@ class BacktestEngine:
                             commission = self._compute_force_close_fee(
                                 symbol, Side.SELL, qty, price, day
                             )
-                            trades = pos.sell_lots_fifo(qty, price, day, commission)
+                            if lot_method == "lifo":
+                                trades = pos.sell_lots_lifo(qty, price, day, commission)
+                            elif lot_method == "highest_cost":
+                                trades = pos.sell_lots_by_cost(qty, price, day, commission, highest_first=True)
+                            elif lot_method == "lowest_cost":
+                                trades = pos.sell_lots_by_cost(qty, price, day, commission, highest_first=False)
+                            else:
+                                trades = pos.sell_lots_fifo(qty, price, day, commission)
                             portfolio.trade_log.extend(trades)
                             portfolio.cash += price * qty - commission
                         elif pos.total_quantity < 0:
@@ -888,7 +897,20 @@ class BacktestEngine:
             return sma_ok and vix_ok and fred_ok
 
     def _force_close_all(self, portfolio: Portfolio, last_date: date) -> None:
-        """Close all remaining positions at their last known market price."""
+        """Close all remaining positions at their last known market price.
+
+        Also cancels any pending broker orders to prevent GTC orders from
+        re-opening positions after a drawdown halt.
+        """
+        # Cancel pending orders first to prevent GTC orders from filling
+        # after positions are force-closed.
+        broker = getattr(self, "_broker", None)
+        if broker is not None:
+            cancelled = broker.cancel_all_pending()
+            if cancelled:
+                logger.debug(f"Force-close: cancelled {cancelled} pending orders")
+
+        lot_method = getattr(getattr(self, "config", None), "lot_method", "fifo")
         for symbol in list(portfolio.positions.keys()):
             pos = portfolio.positions[symbol]
             if pos.total_quantity > 0:
@@ -904,7 +926,14 @@ class BacktestEngine:
                     commission = self._compute_force_close_fee(
                         symbol, Side.SELL, qty, price, last_date
                     )
-                    trades = pos.sell_lots_fifo(qty, price, last_date, commission)
+                    if lot_method == "lifo":
+                        trades = pos.sell_lots_lifo(qty, price, last_date, commission)
+                    elif lot_method == "highest_cost":
+                        trades = pos.sell_lots_by_cost(qty, price, last_date, commission, highest_first=True)
+                    elif lot_method == "lowest_cost":
+                        trades = pos.sell_lots_by_cost(qty, price, last_date, commission, highest_first=False)
+                    else:
+                        trades = pos.sell_lots_fifo(qty, price, last_date, commission)
                     portfolio.trade_log.extend(trades)
                     portfolio.cash += price * qty - commission
                     portfolio.close_position(symbol)

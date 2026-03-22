@@ -280,3 +280,113 @@ class TestActivityLogOrdering:
         assert portfolio.activity_log[1].symbol == "MSFT"
         assert portfolio.activity_log[2].action == Side.SELL
         assert portfolio.activity_log[2].symbol == "AAPL"
+
+
+# ---------------------------------------------------------------------------
+# Coverage-expanding tests
+# ---------------------------------------------------------------------------
+
+
+class TestActivityLogCSVExportEdgeCases:
+    """Edge cases for CSV export of activity log."""
+
+    def test_csv_export_empty_log(self):
+        """Empty activity log should produce CSV with header only."""
+        from backtester.analytics.report import export_activity_log_csv
+        from backtester.config import BacktestConfig
+        from backtester.engine import BacktestResult
+
+        portfolio = Portfolio(cash=100_000.0)
+        portfolio.equity_history = [(date(2020, 1, 3), 100_000.0)]
+
+        config = BacktestConfig(
+            strategy_name="test", tickers=["AAPL"], benchmark="SPY",
+            start_date=date(2020, 1, 1), end_date=date(2020, 12, 31),
+            starting_cash=100_000.0, max_positions=10, max_alloc_pct=0.10,
+        )
+        result = BacktestResult(config=config, portfolio=portfolio)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = str(Path(tmpdir) / "activity.csv")
+            export_activity_log_csv(result, filepath)
+
+            with open(filepath) as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            assert len(rows) == 0
+
+
+class TestActivityLogMultipleFillsSameDay:
+    """Multiple fills on the same date should all appear in the log."""
+
+    def test_two_buys_same_day(self):
+        """Two BUY orders filled on the same date produce two log entries."""
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=100_000.0)
+
+        order1 = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                       order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        order2 = Order(symbol="MSFT", side=Side.BUY, quantity=20,
+                       order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order1)
+        broker.submit_order(order2)
+
+        market_data = {
+            "AAPL": make_row(open_price=100.0),
+            "MSFT": make_row(open_price=200.0),
+        }
+        broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(portfolio.activity_log) == 2
+        # Both on same date
+        assert portfolio.activity_log[0].date == date(2020, 1, 3)
+        assert portfolio.activity_log[1].date == date(2020, 1, 3)
+
+    def test_buy_then_sell_same_day(self):
+        """A BUY and SELL on different symbols on the same fill day."""
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(50, 100.0, date(2020, 1, 2))
+
+        buy_order = Order(symbol="MSFT", side=Side.BUY, quantity=10,
+                          order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        sell_order = Order(symbol="AAPL", side=Side.SELL, quantity=-1,
+                           order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(buy_order)
+        broker.submit_order(sell_order)
+
+        market_data = {
+            "AAPL": make_row(open_price=110.0),
+            "MSFT": make_row(open_price=200.0),
+        }
+        broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(portfolio.activity_log) == 2
+        actions = [e.action for e in portfolio.activity_log]
+        assert Side.BUY in actions
+        assert Side.SELL in actions
+
+
+class TestActivityLogPartialSell:
+    """Partial sell should record only the sold quantity."""
+
+    def test_partial_sell_logs_correct_quantity(self):
+        """Selling fewer shares than held should log only the sold amount."""
+        broker = _broker_no_costs()
+        portfolio = Portfolio(cash=50_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=30,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order)
+        broker.process_fills(date(2020, 1, 6), {"AAPL": make_row(open_price=120.0)}, portfolio)
+
+        assert len(portfolio.activity_log) == 1
+        entry = portfolio.activity_log[0]
+        assert entry.quantity == 30
+        assert entry.price == 120.0
+        # Position still has 70 shares
+        assert portfolio.positions["AAPL"].total_quantity == 70

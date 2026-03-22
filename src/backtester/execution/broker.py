@@ -25,13 +25,14 @@ class SimulatedBroker:
 
     def __init__(self, slippage: SlippageModel | None = None, fees: FeeModel | None = None,
                  max_volume_pct: float = 0.10, partial_fill_policy: str = "cancel",
-                 fill_price_model: str = "open"):
+                 fill_price_model: str = "open", lot_method: str = "fifo"):
         self._slippage = slippage or FixedSlippage()
         self._fees = fees or PerTradeFee()
         self._pending_orders: list[Order] = []
         self._max_volume_pct = max_volume_pct
         self._partial_fill_policy = partial_fill_policy
         self._fill_price_model = fill_price_model
+        self._lot_method = lot_method
         # Gap 13: Bracket order tracking
         self._bracket_children: dict[str, list[Order]] = {}  # parent_id -> child orders
         self._active_brackets: dict[str, list[Order]] = {}  # parent_id -> active children
@@ -56,6 +57,16 @@ class SimulatedBroker:
     @property
     def pending_orders(self) -> list[Order]:
         return list(self._pending_orders)
+
+    def cancel_all_pending(self) -> int:
+        """Cancel all pending orders and return the count cancelled."""
+        count = len(self._pending_orders)
+        for order in self._pending_orders:
+            order.status = OrderStatus.CANCELLED
+        self._pending_orders.clear()
+        self._bracket_children.clear()
+        self._active_brackets.clear()
+        return count
 
     def _determine_fill_price(
         self, order: Order, row: pd.Series
@@ -369,7 +380,14 @@ class SimulatedBroker:
                     continue
                 else:
                     avg_cost = pos.avg_entry_price
-                    trades = pos.sell_lots_fifo(quantity, fill_price, current_date, commission)
+                    if self._lot_method == "lifo":
+                        trades = pos.sell_lots_lifo(quantity, fill_price, current_date, commission)
+                    elif self._lot_method == "highest_cost":
+                        trades = pos.sell_lots_by_cost(quantity, fill_price, current_date, commission, highest_first=True)
+                    elif self._lot_method == "lowest_cost":
+                        trades = pos.sell_lots_by_cost(quantity, fill_price, current_date, commission, highest_first=False)
+                    else:
+                        trades = pos.sell_lots_fifo(quantity, fill_price, current_date, commission)
                     portfolio.trade_log.extend(trades)
                     portfolio.cash += fill_price * quantity - commission
                     portfolio.activity_log.append(TradeLogEntry(

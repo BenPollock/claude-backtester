@@ -373,6 +373,81 @@ class TestResampleOHLCV:
         assert list(daily.columns) == original_cols
 
 
+class TestResampleOHLCVEdgeCases:
+    """Edge case tests for resample_ohlcv."""
+
+    def _make_daily(self, days=60):
+        dates = pd.bdate_range("2020-01-02", periods=days, freq="B")
+        rng = np.random.default_rng(42)
+        close = 100.0 + np.cumsum(rng.normal(0, 1, days))
+        close = np.maximum(close, 1.0)
+        return pd.DataFrame(
+            {
+                "Open": close * 0.999,
+                "High": close * 1.01,
+                "Low": close * 0.99,
+                "Close": close,
+                "Volume": np.full(days, 1_000_000),
+            },
+            index=pd.DatetimeIndex(dates, name="Date"),
+        )
+
+    def test_single_day_input(self):
+        """resample_ohlcv with 1 row produces 1 row."""
+        daily = self._make_daily(1)
+        weekly = resample_ohlcv(daily, "weekly")
+        assert len(weekly) == 1
+        assert weekly["Close"].iloc[0] == daily["Close"].iloc[0]
+
+    def test_two_day_input(self):
+        """resample_ohlcv with 2 rows in same week produces 1 weekly row."""
+        daily = self._make_daily(2)
+        weekly = resample_ohlcv(daily, "weekly")
+        assert len(weekly) >= 1
+        # High should be the max of both days
+        assert weekly["High"].iloc[0] == daily["High"].max()
+
+    def test_monthly_with_few_days(self):
+        """Monthly resample with < 1 month of data produces 1 row."""
+        daily = self._make_daily(10)
+        monthly = resample_ohlcv(daily, "monthly")
+        assert len(monthly) >= 1
+
+    def test_weekly_close_is_last(self):
+        """Weekly Close should be the last Close of the week."""
+        daily = self._make_daily(10)
+        weekly = resample_ohlcv(daily, "weekly")
+        first_week_end = weekly.index[0]
+        daily_in_week = daily.loc[daily.index <= first_week_end]
+        assert weekly["Close"].iloc[0] == daily_in_week["Close"].iloc[-1]
+
+    def test_weekly_open_is_first(self):
+        """Weekly Open should be the first Open of the week."""
+        daily = self._make_daily(10)
+        weekly = resample_ohlcv(daily, "weekly")
+        first_week_end = weekly.index[0]
+        daily_in_week = daily.loc[daily.index <= first_week_end]
+        assert weekly["Open"].iloc[0] == daily_in_week["Open"].iloc[0]
+
+
+class TestDataManagerEdgeCases:
+    """Additional DataManager edge cases."""
+
+    def test_load_many_with_missing_symbol(self):
+        """load_many skips symbols that the source doesn't have."""
+        source = MockDataSource()
+        source.add("A", make_price_df(start="2020-01-02", days=50))
+        # "B" is not added to source
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = DataManager(cache_dir=tmpdir, source=source)
+            results = mgr.load_many(["A", "B"], date(2020, 1, 2), date(2020, 3, 31))
+            assert "A" in results
+            # "B" should either be missing or empty, depending on implementation
+            if "B" in results:
+                assert results["B"] is None or len(results["B"]) == 0
+
+
 class TestCacheCoverageFallback:
     """Test cache coverage validation in DataManager.load."""
 

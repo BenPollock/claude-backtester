@@ -1033,3 +1033,200 @@ class TestBrokerGTCExpiry:
         assert len(fills) == 1
         assert fills[0].price == 90.0
         assert order.status == OrderStatus.FILLED
+
+
+# ---------------------------------------------------------------------------
+# Coverage-expanding tests
+# ---------------------------------------------------------------------------
+
+
+class TestBrokerFillPriceRandom:
+    """Test the random fill price model."""
+
+    def test_random_fill_within_range(self):
+        """fill_price_model='random' should fill between Low and High."""
+        import random
+        random.seed(42)
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+            fill_price_model="random",
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=10,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        row = pd.Series({"Open": 100.0, "High": 110.0, "Low": 90.0,
+                         "Close": 105.0, "Volume": 1_000_000})
+        fills = broker.process_fills(date(2020, 1, 3), {"AAPL": row}, portfolio)
+
+        assert len(fills) == 1
+        assert 90.0 <= fills[0].price <= 110.0
+
+
+class TestBrokerBuySentinelOnLongPosition:
+    """BUY with qty=-1 on a long (non-short) position should cancel."""
+
+    def test_buy_sentinel_on_long_cancelled(self):
+        """BUY sentinel (-1) when position is long should be cancelled."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=-1,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=105.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.CANCELLED
+        # Position unchanged
+        assert portfolio.positions["AAPL"].total_quantity == 100
+
+    def test_buy_sentinel_no_position_cancelled(self):
+        """BUY sentinel (-1) with no position should be cancelled."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=-1,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=100.0)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.CANCELLED
+        assert portfolio.cash == 100_000.0
+
+
+class TestBrokerCoverNoShortPosition:
+    """COVER (BUY with reason='cover') when no short position exists."""
+
+    def test_cover_on_long_position_cancelled(self):
+        """COVER on a long position should cancel, not mutate portfolio."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=50,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=105.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.CANCELLED
+        # Long position unchanged
+        assert portfolio.positions["AAPL"].total_quantity == 100
+        assert portfolio.cash == 100_000.0
+
+    def test_cover_no_position_cancelled(self):
+        """COVER on non-existent position should cancel."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=50,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=105.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 0
+        assert order.status == OrderStatus.CANCELLED
+
+
+class TestBrokerSellClampToZero:
+    """SELL clamped to 0 when position is already flat."""
+
+    def test_sell_clamped_to_zero_cancelled(self):
+        """If position qty is 0 after clamping, order is cancelled."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        # Create position but it's empty (0 shares)
+        pos = portfolio.open_position("AAPL")
+
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=50,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2))
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=100.0)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        # Position has 0 shares; clamp => 0; cancel
+        assert len(fills) == 0
+
+
+class TestBrokerActivityLog:
+    """Verify activity log entries are created for various order types."""
+
+    def test_short_entry_creates_activity_log(self):
+        """Short entry should create an activity log with SELL action."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=5.0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        order = Order(symbol="AAPL", side=Side.SELL, quantity=100,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 2),
+                      reason="short_entry")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=150.0)}
+        fills = broker.process_fills(date(2020, 1, 3), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert len(portfolio.activity_log) == 1
+        log = portfolio.activity_log[0]
+        assert log.action == Side.SELL
+        assert log.quantity == 100
+        assert log.price == 150.0
+        assert log.fees == 5.0
+
+    def test_cover_creates_activity_log_with_cost_basis(self):
+        """Cover should create activity log with avg_cost_basis."""
+        broker = SimulatedBroker(
+            slippage=FixedSlippage(bps=0),
+            fees=PerTradeFee(fee=0),
+        )
+        portfolio = Portfolio(cash=100_000.0)
+        pos = portfolio.open_position("AAPL")
+        pos.add_lot(-100, 150.0, date(2020, 1, 2))
+
+        order = Order(symbol="AAPL", side=Side.BUY, quantity=100,
+                      order_type=OrderType.MARKET, signal_date=date(2020, 1, 3),
+                      reason="cover")
+        broker.submit_order(order)
+
+        market_data = {"AAPL": make_row(open_price=140.0)}
+        fills = broker.process_fills(date(2020, 1, 6), market_data, portfolio)
+
+        assert len(fills) == 1
+        assert len(portfolio.activity_log) == 1
+        log = portfolio.activity_log[0]
+        assert log.action == Side.BUY
+        assert log.avg_cost_basis == 150.0  # original short entry price

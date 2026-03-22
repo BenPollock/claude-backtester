@@ -78,10 +78,12 @@ def purged_kfold_cv(
             logger.warning(f"  No valid train periods for fold {test_idx + 1}")
             continue
 
-        # Use the longest contiguous train period for optimization
-        # (simplified: use full date range minus test fold with purge)
-        train_start = min(p[0] for p in train_periods)
-        train_end = max(p[1] for p in train_periods)
+        # Use the longest contiguous train period for optimization.
+        # Cannot merge non-contiguous periods via min/max as that would
+        # span across the test fold, causing train-test leakage.
+        longest = max(train_periods, key=lambda p: (p[1] - p[0]).days)
+        train_start = longest[0]
+        train_end = longest[1]
 
         # Optimize on train
         train_config = replace(base_config, start_date=train_start, end_date=train_end)

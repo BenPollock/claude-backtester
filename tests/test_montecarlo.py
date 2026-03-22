@@ -117,3 +117,73 @@ class TestMonteCarloEdgeCases:
         assert "p90" in result
         assert "p5" not in result  # not requested
         assert "final_values" in result  # always included
+
+
+# ---------------------------------------------------------------------------
+# Coverage-expanding tests
+# ---------------------------------------------------------------------------
+
+
+class TestMonteCarloPercentileAccuracy:
+    """Verify percentile values are numerically correct."""
+
+    def test_p50_is_median(self):
+        """p50 should be the median of paths at each timestep."""
+        equity = make_equity(np.linspace(100, 130, 30))
+        paths = run_monte_carlo(equity, n_simulations=200, seed=42)
+        result = monte_carlo_percentiles(paths)
+
+        # At each timestep, p50 should equal np.median
+        for i in range(paths.shape[1]):
+            expected_median = np.median(paths[:, i])
+            np.testing.assert_allclose(
+                result["p50"][i], expected_median,
+                err_msg=f"p50 != median at step {i}"
+            )
+
+    def test_p5_is_5th_percentile(self):
+        """p5 should equal the 5th percentile at each timestep."""
+        equity = make_equity(np.linspace(100, 130, 30))
+        paths = run_monte_carlo(equity, n_simulations=500, seed=42)
+        result = monte_carlo_percentiles(paths)
+
+        for i in range(paths.shape[1]):
+            expected = np.percentile(paths[:, i], 5)
+            np.testing.assert_allclose(
+                result["p5"][i], expected,
+                err_msg=f"p5 != 5th percentile at step {i}"
+            )
+
+    def test_final_values_match_last_column(self):
+        """final_values should be the last column of paths."""
+        equity = make_equity(np.linspace(100, 120, 20))
+        paths = run_monte_carlo(equity, n_simulations=100, seed=42)
+        result = monte_carlo_percentiles(paths)
+
+        np.testing.assert_array_equal(result["final_values"], paths[:, -1])
+
+
+class TestMonteCarloSingleSimulation:
+    """Monte Carlo with n_simulations=1."""
+
+    def test_single_simulation_shape(self):
+        equity = make_equity(np.linspace(100, 120, 10))
+        paths = run_monte_carlo(equity, n_simulations=1, seed=42)
+        assert paths.shape == (1, 9)
+
+    def test_single_simulation_percentiles(self):
+        """All percentiles should be the same for a single simulation."""
+        equity = make_equity(np.linspace(100, 120, 10))
+        paths = run_monte_carlo(equity, n_simulations=1, seed=42)
+        result = monte_carlo_percentiles(paths)
+        np.testing.assert_array_equal(result["p5"], result["p95"])
+
+
+class TestMonteCarloNoSeed:
+    """Monte Carlo without seed should still work (non-deterministic)."""
+
+    def test_no_seed_produces_valid_paths(self):
+        equity = make_equity(np.linspace(100, 120, 50))
+        paths = run_monte_carlo(equity, n_simulations=50, seed=None)
+        assert paths.shape == (50, 49)
+        assert np.all(paths > 0)

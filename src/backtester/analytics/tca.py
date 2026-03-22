@@ -14,7 +14,7 @@ def compute_turnover(
     if not trades or len(equity_series) < 2:
         return 0.0
 
-    total_traded = sum(t.quantity * t.entry_price for t in trades)
+    total_traded = sum(abs(t.quantity) * t.entry_price for t in trades)
     avg_equity = equity_series.mean()
     if avg_equity <= 0:
         return 0.0

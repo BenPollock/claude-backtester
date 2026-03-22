@@ -1020,3 +1020,128 @@ class TestHoldingDays:
 
         trades = pos.close_lots_fifo(100, 90.0, date(2020, 3, 15))
         assert trades[0].holding_days == 14
+
+
+# ===========================================================================
+# Coverage-expanding tests
+# ===========================================================================
+
+
+class TestGetPositionReturnsNone:
+    """Verify get_position returns None for unknown symbols."""
+
+    def test_get_position_unknown_symbol(self):
+        p = Portfolio(cash=100_000.0)
+        assert p.get_position("UNKNOWN") is None
+
+    def test_has_position_unknown_symbol(self):
+        p = Portfolio(cash=100_000.0)
+        assert not p.has_position("UNKNOWN")
+
+
+class TestRebalanceMissingPrice:
+    """Rebalance when a held position's symbol is missing from prices dict."""
+
+    def test_missing_price_excludes_symbol(self):
+        """Position with no price in prices dict should be excluded from current weights."""
+        from backtester.types import Side
+
+        p = Portfolio(cash=50_000.0)
+        pos_a = p.open_position("AAPL")
+        pos_a.add_lot(100, 100.0, date(2020, 1, 2))
+        pos_a.update_market_price(100.0)
+
+        pos_b = p.open_position("MSFT")
+        pos_b.add_lot(50, 200.0, date(2020, 1, 2))
+        pos_b.update_market_price(200.0)
+
+        # Provide price for AAPL only, not MSFT
+        orders = p.compute_rebalance_orders(
+            target_weights={"AAPL": 0.20},
+            prices={"AAPL": 100.0},  # MSFT missing
+        )
+        # MSFT should not generate any order since it's not in prices
+        syms = [s for s, _, _ in orders]
+        assert "MSFT" not in syms
+
+    def test_zero_price_excludes_symbol(self):
+        """Symbol with price=0 should be excluded from rebalance."""
+        from backtester.types import Side
+
+        p = Portfolio(cash=50_000.0)
+        pos = p.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+        pos.update_market_price(100.0)
+
+        orders = p.compute_rebalance_orders(
+            target_weights={"AAPL": 0.50},
+            prices={"AAPL": 0.0},  # zero price
+        )
+        assert orders == []
+
+    def test_negative_target_weight_skipped(self):
+        """Negative target weight should be treated like zero (skipped)."""
+        from backtester.types import Side
+
+        p = Portfolio(cash=100_000.0)
+        orders = p.compute_rebalance_orders(
+            target_weights={"AAPL": -0.10, "MSFT": 0.30},
+            prices={"AAPL": 100.0, "MSFT": 200.0},
+        )
+        # Only MSFT should get a BUY; AAPL negative weight skipped
+        syms = [s for s, _, _ in orders]
+        assert "AAPL" not in syms
+        assert "MSFT" in syms
+
+
+class TestSnapshotMarginUsed:
+    """Verify snapshot includes margin_used from short positions."""
+
+    def test_snapshot_includes_margin_used(self):
+        p = Portfolio(cash=100_000.0)
+        pos = p.open_position("AAPL")
+        pos.add_lot(-100, 100.0, date(2020, 1, 2))
+        pos.update_market_price(100.0)
+
+        snap = p.snapshot()
+        assert snap.margin_used == 10_000.0
+
+    def test_snapshot_zero_margin_for_long(self):
+        p = Portfolio(cash=100_000.0)
+        pos = p.open_position("AAPL")
+        pos.add_lot(100, 100.0, date(2020, 1, 2))
+        pos.update_market_price(100.0)
+
+        snap = p.snapshot()
+        assert snap.margin_used == 0.0
+
+
+class TestMaxPositionValueMixed:
+    """max_position_value with mixed long and short positions."""
+
+    def test_mixed_long_short(self):
+        """max_position_value should return the largest market_value (long wins)."""
+        p = Portfolio(cash=100_000.0)
+
+        pos_long = p.open_position("AAPL")
+        pos_long.add_lot(100, 100.0, date(2020, 1, 2))
+        pos_long.update_market_price(100.0)  # market_value = 10000
+
+        pos_short = p.open_position("MSFT")
+        pos_short.add_lot(-200, 30.0, date(2020, 1, 2))
+        pos_short.update_market_price(30.0)  # market_value = -6000
+
+        assert p.max_position_value() == 10_000.0  # long position is max
+
+
+class TestOpenPositionIdempotent:
+    """open_position should return existing position if already exists."""
+
+    def test_open_existing_returns_same(self):
+        p = Portfolio(cash=100_000.0)
+        pos1 = p.open_position("AAPL")
+        pos1.add_lot(100, 100.0, date(2020, 1, 2))
+
+        pos2 = p.open_position("AAPL")
+        assert pos2 is pos1
+        assert pos2.total_quantity == 100

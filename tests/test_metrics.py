@@ -569,3 +569,124 @@ class TestInfClamping:
             if isinstance(v, float):
                 assert v != float("inf"), f"{k} should not be inf"
                 assert v != float("-inf"), f"{k} should not be -inf"
+
+
+# ---------------------------------------------------------------------------
+# Coverage-expanding tests
+# ---------------------------------------------------------------------------
+
+
+class TestSharpeWithRiskFreeRate:
+    """Sharpe and Sortino with non-zero risk-free rate."""
+
+    def test_sharpe_with_positive_risk_free(self):
+        """Non-zero risk_free_rate should reduce the Sharpe ratio vs zero rf."""
+        rng = np.random.default_rng(42)
+        values = [100.0]
+        for _ in range(251):
+            values.append(values[-1] * (1 + 0.0005 + rng.normal(0, 0.01)))
+        equity = make_equity(values)
+        sharpe_0 = sharpe_ratio(equity, risk_free_rate=0.0)
+        sharpe_5 = sharpe_ratio(equity, risk_free_rate=0.05)
+        # Higher risk-free rate reduces excess returns and thus Sharpe
+        assert sharpe_5 < sharpe_0
+
+    def test_sortino_with_positive_risk_free(self):
+        """Non-zero risk_free_rate should reduce the Sortino ratio."""
+        rng = np.random.default_rng(42)
+        values = [100.0]
+        for _ in range(251):
+            values.append(values[-1] * (1 + 0.0005 + rng.normal(0, 0.01)))
+        equity = make_equity(values)
+        sortino_0 = sortino_ratio(equity, risk_free_rate=0.0)
+        sortino_5 = sortino_ratio(equity, risk_free_rate=0.05)
+        assert sortino_5 < sortino_0
+
+
+class TestMaxDrawdownAllZero:
+    """max_drawdown with degenerate equity series."""
+
+    def test_all_zero_equity(self):
+        """All-zero equity should return 0.0 (no drawdown computable)."""
+        equity = make_equity([0.0, 0.0, 0.0, 0.0])
+        assert max_drawdown(equity) == 0.0
+
+    def test_single_value(self):
+        """Single-value series (< 2 items) should return 0.0."""
+        equity = make_equity([100.0])
+        assert max_drawdown(equity) == 0.0
+
+    def test_drawdown_starts_on_first_bar(self):
+        """Drawdown starting on the first bar should be tracked."""
+        # Peak on first bar, then immediate decline
+        equity = make_equity([200.0, 180.0, 160.0, 170.0])
+        dd = max_drawdown(equity)
+        # Max drawdown: (160 - 200) / 200 = -0.20
+        assert dd == pytest.approx(-0.20)
+
+    def test_drawdown_duration_starts_on_first_bar(self):
+        """Drawdown duration when the drawdown starts on bar 1."""
+        equity = make_equity([200.0, 180.0, 160.0, 170.0, 190.0])
+        duration = max_drawdown_duration(equity)
+        assert duration > 0
+
+
+class TestTotalReturnEdgeCases:
+    """Edge cases for total_return."""
+
+    def test_total_return_zero_start(self):
+        """Start at zero should return 0.0 (avoid division by zero)."""
+        equity = make_equity([0.0, 100.0, 200.0])
+        assert total_return(equity) == 0.0
+
+    def test_total_return_single_value(self):
+        """Single value should return 0.0."""
+        equity = make_equity([100.0])
+        assert total_return(equity) == 0.0
+
+    def test_cagr_zero_start(self):
+        """CAGR with zero start value should return 0.0."""
+        equity = make_equity([0.0, 100.0, 200.0])
+        assert cagr(equity) == 0.0
+
+    def test_cagr_single_day(self):
+        """CAGR with 0 days between start and end returns 0.0."""
+        equity = make_equity([100.0])
+        assert cagr(equity) == 0.0
+
+
+class TestComputeAllWithBenchmark:
+    """compute_all_metrics with benchmark includes all expected keys."""
+
+    def test_benchmark_metrics_keys_present(self):
+        """All benchmark-relative keys should appear when benchmark is given."""
+        equity = make_equity(np.linspace(100, 130, 50))
+        benchmark = make_equity(np.linspace(100, 120, 50))
+        m = compute_all_metrics(equity, [], benchmark_series=benchmark)
+        expected_keys = ["alpha", "beta", "information_ratio", "tracking_error",
+                         "up_capture", "down_capture", "treynor_ratio"]
+        for key in expected_keys:
+            assert key in m, f"Missing key: {key}"
+
+    def test_risk_free_rate_affects_alpha(self):
+        """Non-zero risk_free_rate should produce different alpha."""
+        equity = make_equity(np.linspace(100, 130, 252))
+        benchmark = make_equity(np.linspace(100, 120, 252))
+        m_0 = compute_all_metrics(equity, [], risk_free_rate=0.0,
+                                   benchmark_series=benchmark)
+        m_5 = compute_all_metrics(equity, [], risk_free_rate=0.05,
+                                   benchmark_series=benchmark)
+        # Different risk-free rates produce different alphas
+        assert m_0["alpha"] != m_5["alpha"]
+
+
+class TestMaxConsecutiveZeroPnl:
+    """max_consecutive with zero PnL trades (neither win nor loss)."""
+
+    def test_zero_pnl_resets_streaks(self):
+        """A trade with pnl=0 is neither a win nor a loss; resets both streaks."""
+        t_win = Trade("A", date(2020, 1, 2), date(2020, 2, 1), 100, 110, 10, 100, 0.10, 30, 0)
+        t_zero = Trade("A", date(2020, 2, 1), date(2020, 3, 1), 100, 100, 0, 0, 0.0, 28, 0)
+        t_loss = Trade("A", date(2020, 3, 1), date(2020, 4, 1), 100, 90, -10, -100, -0.10, 31, 0)
+        result = max_consecutive([t_win, t_win, t_zero, t_win])
+        assert result["max_consecutive_wins"] == 2  # reset by zero PnL

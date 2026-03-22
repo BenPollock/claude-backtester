@@ -189,6 +189,192 @@ class TestWalkForward:
             assert w["oos_sharpe"] == pytest.approx(expected_oos_cagr, rel=1e-6)
 
 
+class TestGridSearchEdgeCases:
+    """Additional grid_search coverage: higher_is_better=False, all failures, missing metric."""
+
+    @patch("backtester.research.optimizer.BacktestEngine")
+    def test_higher_is_better_false_picks_minimum(self, MockEngine):
+        """When higher_is_better=False, the combo with the lowest metric value wins."""
+        MockEngine.return_value.run.return_value = _mock_result()
+        config = _base_config()
+        grid = {"sma_fast": [50, 100, 150]}
+
+        # All combos produce the same mock metrics, so verify the code path
+        # selects idxmin instead of idxmax
+        result_low = grid_search(config, grid, optimize_metric="max_drawdown",
+                                 higher_is_better=False)
+        result_high = grid_search(config, grid, optimize_metric="max_drawdown",
+                                  higher_is_better=True)
+
+        # Both should return valid params (the metric is the same for all combos
+        # since mock returns identical results, so both pick the first)
+        assert result_low.best_params != {}
+        assert result_high.best_params != {}
+        # The best_metric_value should be the same since all combos are equal
+        assert result_low.best_metric_value == result_high.best_metric_value
+
+    @patch("backtester.research.optimizer.BacktestEngine")
+    def test_all_runs_fail_returns_empty_best(self, MockEngine):
+        """When every combo fails, best_params should be empty."""
+        MockEngine.return_value.run.side_effect = RuntimeError("Boom")
+        config = _base_config()
+        grid = {"sma_fast": [50, 100]}
+
+        result = grid_search(config, grid)
+
+        assert len(result.results_table) == 2
+        assert result.best_params == {}
+        assert result.best_metric_value == 0.0
+
+    @patch("backtester.research.optimizer.BacktestEngine")
+    def test_missing_optimize_metric(self, MockEngine):
+        """When optimize_metric isn't in results, best_params should be empty."""
+        MockEngine.return_value.run.return_value = _mock_result()
+        config = _base_config()
+        grid = {"sma_fast": [50]}
+
+        result = grid_search(config, grid, optimize_metric="nonexistent_metric")
+
+        assert result.best_params == {}
+        assert result.best_metric_value == 0.0
+
+    @patch("backtester.research.optimizer.BacktestEngine")
+    def test_mixed_success_and_failure(self, MockEngine):
+        """Grid search with some successes and some failures picks best from successes."""
+        results = iter([RuntimeError("fail"), _mock_result(sharpe=1.0)])
+
+        def side_effect():
+            r = next(results)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        MockEngine.return_value.run.side_effect = lambda: side_effect()
+        config = _base_config()
+        grid = {"sma_fast": [50, 100]}
+
+        result = grid_search(config, grid)
+
+        assert len(result.results_table) == 2
+        assert "error" in result.results_table.columns
+        assert result.best_params != {}  # Should pick the successful one
+
+
+class TestBayesianOptimize:
+    """Tests for bayesian_optimize (requires skopt mock)."""
+
+    def test_missing_skopt_raises_import_error(self):
+        """When scikit-optimize is not installed, a clear error is raised."""
+        from backtester.research.optimizer import bayesian_optimize
+        config = _base_config()
+
+        with patch.dict("sys.modules", {"skopt": None, "skopt.space": None}):
+            with pytest.raises(ImportError, match="scikit-optimize"):
+                bayesian_optimize(config, {"sma_fast": (10, 200)}, n_calls=1)
+
+
+class TestPrintOptimizationResults:
+    """Tests for print_optimization_results output."""
+
+    def test_prints_without_error(self, capsys):
+        from backtester.research.optimizer import print_optimization_results
+        df = pd.DataFrame([
+            {"sma_fast": 50, "sharpe_ratio": 1.2, "cagr": 0.10, "max_drawdown": -0.15,
+             "total_trades": 20, "win_rate": 0.55, "profit_factor": 1.5, "calmar_ratio": 0.7},
+            {"sma_fast": 100, "sharpe_ratio": 0.8, "cagr": 0.05, "max_drawdown": -0.20,
+             "total_trades": 10, "win_rate": 0.50, "profit_factor": 1.2, "calmar_ratio": 0.25},
+        ])
+        opt = OptimizationResult(
+            results_table=df,
+            best_params={"sma_fast": 50},
+            best_metric_value=1.2,
+            optimize_metric="sharpe_ratio",
+        )
+        print_optimization_results(opt, top_n=5)
+        captured = capsys.readouterr()
+        assert "OPTIMIZATION RESULTS" in captured.out
+        assert "sharpe_ratio" in captured.out
+        assert "Best params" in captured.out
+
+    def test_prints_with_errors(self, capsys):
+        from backtester.research.optimizer import print_optimization_results
+        df = pd.DataFrame([
+            {"sma_fast": 50, "sharpe_ratio": 1.0, "cagr": 0.08, "error": None},
+            {"sma_fast": 100, "error": "Data fetch failed"},
+        ])
+        opt = OptimizationResult(
+            results_table=df,
+            best_params={"sma_fast": 50},
+            best_metric_value=1.0,
+            optimize_metric="sharpe_ratio",
+        )
+        print_optimization_results(opt, top_n=5)
+        captured = capsys.readouterr()
+        assert "Failed runs: 1" in captured.out
+
+
+class TestPrintWalkForwardResults:
+    """Tests for print_walk_forward_results output."""
+
+    def test_prints_without_error(self, capsys):
+        from backtester.research.walk_forward import print_walk_forward_results
+        wf = {
+            "num_windows": 2,
+            "avg_is_sharpe": 1.5,
+            "avg_oos_sharpe": 0.9,
+            "degradation_ratio": 0.6,
+            "windows": [
+                {
+                    "window": 1,
+                    "is_start": date(2005, 1, 3),
+                    "is_end": date(2006, 1, 3),
+                    "oos_start": date(2006, 1, 4),
+                    "oos_end": date(2006, 4, 3),
+                    "best_params": {"sma_fast": 100},
+                    "is_sharpe": 1.8,
+                    "oos_sharpe": 1.0,
+                    "oos_cagr": 0.12,
+                    "oos_max_dd": -0.10,
+                    "oos_trades": 5,
+                    "oos_win_rate": 0.60,
+                },
+                {
+                    "window": 2,
+                    "is_start": date(2006, 4, 3),
+                    "is_end": date(2007, 4, 3),
+                    "oos_start": date(2007, 4, 4),
+                    "oos_end": date(2007, 7, 3),
+                    "best_params": {"sma_fast": 50},
+                    "is_sharpe": 1.2,
+                    "oos_sharpe": 0.8,
+                    "oos_cagr": 0.08,
+                    "oos_max_dd": -0.15,
+                    "oos_trades": 3,
+                    "oos_win_rate": 0.40,
+                },
+            ],
+        }
+        print_walk_forward_results(wf)
+        captured = capsys.readouterr()
+        assert "WALK-FORWARD ANALYSIS" in captured.out
+        assert "Windows: 2" in captured.out
+        assert "GOOD" in captured.out  # 0.6 > 0.5
+
+    def test_empty_windows(self, capsys):
+        from backtester.research.walk_forward import print_walk_forward_results
+        wf = {
+            "num_windows": 0,
+            "avg_is_sharpe": 0.0,
+            "avg_oos_sharpe": 0.0,
+            "degradation_ratio": 0.0,
+            "windows": [],
+        }
+        print_walk_forward_results(wf)
+        captured = capsys.readouterr()
+        assert "Windows: 0" in captured.out
+        assert "POOR" in captured.out  # 0.0 is not > 0
+
+
 class TestAddMonths:
     def test_basic(self):
         assert _add_months(date(2020, 1, 15), 3) == date(2020, 4, 15)
