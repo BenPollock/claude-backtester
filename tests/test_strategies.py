@@ -1626,8 +1626,8 @@ class TestRiskRegime:
         signal = s.generate_signals("TEST", row, None, state)
         assert signal == SignalAction.HOLD
 
-    def test_hold_partial_data_one_signal(self):
-        """Only VIX data (1 signal) → even if positive, needs score=3 for BUY."""
+    def test_buy_partial_data_one_signal(self):
+        """Only VIX data (1 signal) and positive → BUY (graceful degradation)."""
         s = get_strategy("risk_regime")
         state = PortfolioState(
             cash=100_000.0, total_equity=100_000.0,
@@ -1639,7 +1639,7 @@ class TestRiskRegime:
             credit_spread=None,
         )
         signal = s.generate_signals("TEST", row, None, state)
-        assert signal == SignalAction.HOLD
+        assert signal == SignalAction.BUY
 
     def test_no_sell_neutral_with_position(self):
         """Neutral signals (1-2 positive) with position → HOLD (no sell)."""

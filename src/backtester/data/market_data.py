@@ -37,7 +37,10 @@ class MarketDataManager:
                 if not df.empty:
                     if hasattr(df.index, "tz") and df.index.tz is not None:
                         df.index = df.index.tz_localize(None)
-                    return df["Close"]
+                    close = df["Close"]
+                    if isinstance(close, pd.DataFrame):
+                        close = close.squeeze()
+                    return close
             except Exception:
                 logger.warning("Failed to read cache for %s", ticker)
 
@@ -48,10 +51,15 @@ class MarketDataManager:
                 if hasattr(data.index, "tz") and data.index.tz is not None:
                     data.index = data.index.tz_localize(None)
                 close = data["Close"]
+                # yfinance >= 0.2.31 returns multi-level columns;
+                # squeeze single-column DataFrame to Series
+                if isinstance(close, pd.DataFrame):
+                    close = close.squeeze()
                 # Save to cache
                 if cache_path:
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    data[["Close"]].to_parquet(cache_path)
+                    save_df = pd.DataFrame({"Close": close})
+                    save_df.to_parquet(cache_path)
                 return close
         except Exception:
             logger.warning("Failed to fetch %s from yfinance", ticker)

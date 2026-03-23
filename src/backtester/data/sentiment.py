@@ -71,7 +71,8 @@ class CBOEPutCallSource:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read().decode("utf-8")
 
-            df = pd.read_csv(io.StringIO(raw))
+            # CBOE CSV has 2 header lines (disclaimer + product) before columns
+            df = pd.read_csv(io.StringIO(raw), skiprows=2)
 
             # Normalize column names — CBOE uses various formats
             col_map = {}

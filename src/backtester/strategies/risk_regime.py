@@ -1,4 +1,4 @@
-"""Risk Regime strategy: allocate based on VIX, yield curve, and credit spread signals."""
+"""Risk Regime strategy: allocate based on VIX, yield curve, credit spread, and intermarket signals."""
 
 import pandas as pd
 
@@ -14,11 +14,12 @@ from backtester.portfolio.position import Position
 class RiskRegime(Strategy):
     """Long-only strategy that toggles risk-on/risk-off based on macro signals.
 
-    Scores three regime indicators: VIX term structure, yield curve spread,
-    and high-yield credit spread. Enters positions in risk-on environments
-    (score 3) with a quality filter (Piotroski F-Score), and exits everything
-    in risk-off (score 0). Gracefully degrades when data columns are absent —
-    NaN inputs are treated as neutral (not counted toward the score).
+    Scores regime indicators: VIX term structure, yield curve spread,
+    high-yield credit spread, copper/gold momentum, and SMA trend.
+    Enters positions when all available signals agree on risk-on,
+    exits when all signals agree on risk-off. Gracefully degrades
+    when data columns are absent — NaN inputs are treated as neutral
+    (not counted toward the score).
 
     Parameters:
         sma_period: Trend filter SMA period (default 200)
@@ -26,6 +27,8 @@ class RiskRegime(Strategy):
         yield_spread_threshold: 10y-2y spread above this is risk-on (default 0.0)
         credit_threshold: HY credit spread below this is risk-on (default 5.0)
         min_f_score: Minimum Piotroski F-Score for entry (default 5)
+        use_trend: Include SMA trend in scoring (default True)
+        use_intermarket: Include copper/gold momentum in scoring (default False)
     """
 
     def __init__(self):
@@ -35,6 +38,10 @@ class RiskRegime(Strategy):
         self.yield_spread_threshold = 0.0
         self.credit_threshold = 5.0
         self.min_f_score = 5
+        self.use_trend = False
+        self.use_intermarket = False
+        self.use_pcr = False
+        self.pcr_fear_threshold = 0.85  # PCR above this = fear = risk-off
 
     def configure(self, params: dict) -> None:
         self.sma_period = params.get("sma_period", self.sma_period)
@@ -44,6 +51,10 @@ class RiskRegime(Strategy):
         )
         self.credit_threshold = params.get("credit_threshold", self.credit_threshold)
         self.min_f_score = params.get("min_f_score", self.min_f_score)
+        self.use_trend = params.get("use_trend", self.use_trend)
+        self.use_intermarket = params.get("use_intermarket", self.use_intermarket)
+        self.use_pcr = params.get("use_pcr", self.use_pcr)
+        self.pcr_fear_threshold = params.get("pcr_fear_threshold", self.pcr_fear_threshold)
 
     def compute_indicators(
         self,
@@ -89,12 +100,37 @@ class RiskRegime(Strategy):
             if credit_spread < self.credit_threshold:
                 score += 1
 
+        # 4. Put-call ratio below fear threshold (low fear = risk-on)
+        if self.use_pcr:
+            pcr_ma = row.get("sentiment_pcr_ma10")
+            if pcr_ma is not None and not pd.isna(pcr_ma):
+                counted += 1
+                if pcr_ma < self.pcr_fear_threshold:
+                    score += 1
+
+        # 6. Copper/gold momentum positive (economic health improving)
+        if self.use_intermarket:
+            cu_au_mom = row.get("intermarket_cu_au_momentum")
+            if cu_au_mom is not None and not pd.isna(cu_au_mom):
+                counted += 1
+                if cu_au_mom > 0:
+                    score += 1
+
+        # 7. Price above SMA trend
+        if self.use_trend:
+            sma_val = row.get("sma_trend")
+            close = row.get("Close")
+            if sma_val is not None and not pd.isna(sma_val):
+                counted += 1
+                if close > sma_val:
+                    score += 1
+
         # If no macro data available, hold — can't determine regime
         if counted == 0:
             return SignalAction.HOLD
 
-        # Risk-on: all 3 signals positive
-        if score == 3:
+        # Risk-on: all available signals positive
+        if score == counted:
             if not has_position:
                 # Quality filter: prefer high F-Score stocks
                 f_score = row.get("fund_piotroski_f")
@@ -110,5 +146,5 @@ class RiskRegime(Strategy):
             if has_position:
                 return SignalAction.SELL
 
-        # Neutral (1-2 signals): HOLD
+        # Neutral: HOLD
         return SignalAction.HOLD
