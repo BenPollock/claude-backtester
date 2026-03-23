@@ -69,10 +69,10 @@ class MultiTimeframeTrend(Strategy):
     def generate_signals(
         self,
         symbol: str,
-        row: dict,
-        positions: dict[str, Position],
+        row: pd.Series,
+        position: Position | None,
         portfolio_state: PortfolioState,
-        benchmark_row: dict | None = None,
+        benchmark_row: pd.Series | None = None,
     ) -> SignalAction:
         """Generate signals based on weekly trend + daily RSI.
 
@@ -93,9 +93,7 @@ class MultiTimeframeTrend(Strategy):
         if weekly_fast_val is None or weekly_slow_val is None or daily_rsi_val is None:
             return SignalAction.HOLD
 
-        has_position = (
-            symbol in positions and positions[symbol].total_quantity > 0
-        )
+        has_position = position is not None and position.total_quantity > 0
 
         weekly_uptrend = weekly_fast_val > weekly_slow_val
 
@@ -113,11 +111,11 @@ class MultiTimeframeTrend(Strategy):
         self,
         symbol: str,
         action: SignalAction,
-        row: dict,
-        positions: dict[str, Position],
+        row: pd.Series,
         portfolio_state: PortfolioState,
+        max_alloc_pct: float,
     ) -> int:
-        """Return -1 for SELL (sell all), defer to sizer for BUY."""
+        """Return -1 for SELL (sell all), defer to default for BUY."""
         if action == SignalAction.SELL:
             return -1
-        return 0  # Let the position sizer handle BUY sizing
+        return super().size_order(symbol, action, row, portfolio_state, max_alloc_pct)

@@ -116,12 +116,15 @@ class TestEstimateSharpeVariance:
         v2 = estimate_sharpe_variance(returns, seed=42)
         assert v1 == v2
 
-    def test_different_seeds_differ(self):
+    def test_different_seeds_same_result(self):
+        # estimate_sharpe_variance now uses the analytical Lo (2002) formula,
+        # so the seed parameter is ignored (no bootstrap). Different seeds
+        # should produce identical results.
         rng = np.random.default_rng(99)
         returns = rng.normal(0.0005, 0.02, 252)
         v1 = estimate_sharpe_variance(returns, seed=42)
         v2 = estimate_sharpe_variance(returns, seed=99)
-        assert v1 != v2
+        assert v1 == v2
 
     def test_more_data_reduces_variance(self):
         # More data points should reduce Sharpe estimation variance

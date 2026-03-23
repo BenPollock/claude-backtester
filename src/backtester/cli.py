@@ -6,6 +6,7 @@ import sys
 from datetime import date
 
 import click
+import pandas as pd
 
 from backtester.config import BacktestConfig, RegimeFilter, StopConfig
 from backtester.engine import BacktestEngine
@@ -157,7 +158,7 @@ def cli(verbose: bool) -> None:
 @cli.command()
 @_add_common_options
 @click.option("--export-log", default=None, type=click.Path(), help="Export activity log to CSV file")
-@click.option("--monte-carlo-runs", default=1000, type=int, help="Number of Monte Carlo simulations (default: 1000)")
+@click.option("--monte-carlo-runs", default=None, type=int, help="Run N Monte Carlo simulations and print summary")
 @click.option("--tearsheet", default=None, type=click.Path(), help="Generate HTML tearsheet at PATH")
 @click.option("--report-regime", is_flag=True, default=False, help="Print regime performance breakdown")
 @click.option("--report-signal-decay", is_flag=True, default=False, help="Print signal decay analysis")
@@ -339,6 +340,22 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
             cap = estimate_capacity(result.trades, result.universe_data)
             click.echo(f"Est. Capacity:    ${cap:,.0f}")
 
+    # Monte Carlo simulation
+    if monte_carlo_runs and monte_carlo_runs > 0:
+        from backtester.analytics.montecarlo import run_monte_carlo, monte_carlo_summary
+        equity = result.equity_series
+        n_days = len(equity) - 1  # number of return periods
+        if n_days > 1:
+            paths = run_monte_carlo(equity, n_simulations=monte_carlo_runs, seed=42)
+            mc = monte_carlo_summary(paths, start_value=equity.iloc[0], n_days=n_days)
+            click.echo(f"\n=== Monte Carlo Simulation ({mc['n_simulations']} runs) ===")
+            click.echo(f"CAGR:     p25={mc['p25_cagr']:.2%}  median={mc['median_cagr']:.2%}  p75={mc['p75_cagr']:.2%}")
+            click.echo(f"Sharpe:   p25={mc['p25_sharpe']:.2f}  median={mc['median_sharpe']:.2f}  p75={mc['p75_sharpe']:.2f}")
+            click.echo(f"Max DD:   p25={mc['p25_max_dd']:.2%}  median={mc['median_max_dd']:.2%}  p75={mc['p75_max_dd']:.2%}")
+            click.echo(f"Final $:  p5=${mc['p5_final']:,.0f}  median=${mc['median_final']:,.0f}  p95=${mc['p95_final']:,.0f}")
+        else:
+            click.echo("Monte Carlo requires at least 2 days of equity data.")
+
     # Gap 7: Overfitting metrics
     if trials:
         from backtester.analytics.overfitting import (
@@ -348,9 +365,17 @@ def run(strategy, tickers, market, universe, benchmark, start, end, cash, max_po
         n_ret = len(result.equity_series)
         returns = result.equity_series.pct_change().dropna().values
         var_sharpes = estimate_sharpe_variance(returns)
+        skew = float(pd.Series(returns).skew()) if len(returns) > 2 else 0.0
+        kurt = float(pd.Series(returns).kurtosis()) + 3.0 if len(returns) > 3 else 3.0
         click.echo(f"\n=== Overfitting Analysis ===")
-        dsr = deflated_sharpe_ratio(observed, trials, var_sharpes, n_ret)
+        dsr = deflated_sharpe_ratio(
+            observed, trials, var_sharpes, n_ret,
+            skewness=skew, kurtosis=kurt,
+        )
         click.echo(f"Deflated Sharpe Ratio: {dsr:.4f} (trials={trials})")
+        click.echo(f"  Observed Sharpe: {observed:.4f}")
+        click.echo(f"  Sharpe Variance: {var_sharpes:.4f}")
+        click.echo(f"  Skew/Kurt:       {skew:.3f} / {kurt:.3f}")
 
     if permutation_test:
         from backtester.analytics.overfitting import permutation_test as perm_test

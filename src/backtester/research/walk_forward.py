@@ -167,6 +167,221 @@ def print_walk_forward_results(wf: dict) -> None:
     print("=" * 70)
 
 
+def expand_rule_based_grid(
+    base_params: dict,
+    threshold_grid: dict[str, list],
+) -> list[dict]:
+    """Expand a rule_based threshold grid into full strategy param dicts.
+
+    For walk-forward compatibility with rule_based strategies, this function
+    allows grid-searching over numeric thresholds embedded in the nested
+    buy_when/sell_when/indicators JSON structure.
+
+    The threshold_grid uses dot-path keys to reference into the nested params:
+        "buy_when.0.2"      -> base_params["buy_when"][0][2]  (rule threshold)
+        "indicators.rsi_2.period" -> base_params["indicators"]["rsi_2"]["period"]
+
+    Example:
+        base_params = {
+            "buy_when": [["rsi_2", "<", 10]],
+            "sell_when": [["close", ">", "sma_5"]],
+            "indicators": {"rsi_2": {"fn": "rsi", "period": 2},
+                           "sma_5": {"fn": "sma", "period": 5}},
+        }
+        threshold_grid = {
+            "buy_when.0.2": [5, 10, 15, 20],
+            "indicators.rsi_2.period": [2, 3, 5],
+        }
+        # Returns 12 full param dicts (4 x 3 combinations)
+
+    Args:
+        base_params: The base strategy_params dict for a rule_based strategy.
+        threshold_grid: Dict of dot-path keys to lists of values to sweep.
+
+    Returns:
+        List of complete strategy_params dicts, one per grid combination.
+    """
+    import copy
+    import itertools
+
+    paths = list(threshold_grid.keys())
+    value_lists = list(threshold_grid.values())
+    combos = list(itertools.product(*value_lists))
+
+    results = []
+    for combo in combos:
+        params = copy.deepcopy(base_params)
+        for path, value in zip(paths, combo):
+            _set_nested(params, path, value)
+        results.append(params)
+
+    return results
+
+
+def rule_based_walk_forward(
+    base_config: BacktestConfig,
+    threshold_grid: dict[str, list],
+    is_months: int = 12,
+    oos_months: int = 3,
+    anchored: bool = False,
+    optimize_metric: str = "sharpe_ratio",
+) -> dict:
+    """Walk-forward analysis for rule_based strategies with threshold grids.
+
+    Instead of flat param_grid keys, accepts dot-path threshold references
+    into the nested rule_based param structure. Internally generates all
+    threshold combinations and runs each as a separate backtest.
+
+    Args:
+        base_config: Base config with rule_based strategy_params set.
+        threshold_grid: Dot-path keys to sweep (see expand_rule_based_grid).
+        is_months: In-sample window in months.
+        oos_months: Out-of-sample window in months.
+        anchored: If True, IS start stays fixed (expanding window).
+        optimize_metric: Metric to optimize in IS period.
+
+    Returns:
+        Same format as walk_forward().
+    """
+    import copy
+    import itertools
+
+    start = base_config.start_date
+    end = base_config.end_date
+    base_params = base_config.strategy_params
+
+    paths = list(threshold_grid.keys())
+    value_lists = list(threshold_grid.values())
+    combos = list(itertools.product(*value_lists))
+
+    windows = []
+    window_num = 0
+
+    is_start = start
+    while True:
+        if anchored:
+            current_is_start = start
+        else:
+            current_is_start = is_start
+
+        is_end = _add_months(is_start, is_months)
+        oos_start = is_end + timedelta(days=1)
+        oos_end = _add_months(oos_start, oos_months)
+
+        if oos_end > end:
+            oos_end = end
+        if oos_start >= end:
+            break
+
+        window_num += 1
+        logger.info(f"Window {window_num}: IS {current_is_start} to {is_end}, "
+                     f"OOS {oos_start} to {oos_end}")
+
+        # In-sample: test all threshold combos
+        best_metric = None
+        best_params = None
+        best_combo = None
+
+        for combo in combos:
+            params = copy.deepcopy(base_params)
+            for path, value in zip(paths, combo):
+                _set_nested(params, path, value)
+
+            is_config = replace(base_config,
+                               start_date=current_is_start,
+                               end_date=is_end,
+                               strategy_params=params)
+            try:
+                engine = BacktestEngine(is_config)
+                result = engine.run()
+                metrics = compute_all_metrics(result.equity_series, result.trades)
+                metric_val = metrics.get(optimize_metric, 0.0)
+
+                if best_metric is None or metric_val > best_metric:
+                    best_metric = metric_val
+                    best_params = params
+                    best_combo = dict(zip(paths, combo))
+            except Exception as e:
+                logger.warning(f"  IS combo {dict(zip(paths, combo))} failed: {e}")
+                continue
+
+        if best_params is None:
+            logger.warning(f"  No valid IS results, skipping window")
+            is_start = _add_months(is_start, oos_months)
+            continue
+
+        is_sharpe = best_metric
+
+        # Out-of-sample test with best IS params
+        oos_config = replace(base_config,
+                            start_date=oos_start,
+                            end_date=oos_end,
+                            strategy_params=best_params)
+        try:
+            engine = BacktestEngine(oos_config)
+            oos_result = engine.run()
+            oos_metrics = compute_all_metrics(oos_result.equity_series, oos_result.trades)
+            oos_sharpe = oos_metrics.get(optimize_metric, 0.0)
+        except Exception as e:
+            logger.warning(f"  OOS test failed: {e}")
+            oos_metrics = {}
+            oos_sharpe = 0.0
+
+        windows.append({
+            "window": window_num,
+            "is_start": current_is_start,
+            "is_end": is_end,
+            "oos_start": oos_start,
+            "oos_end": oos_end,
+            "best_params": best_combo,
+            "is_sharpe": is_sharpe,
+            "oos_sharpe": oos_sharpe,
+            "oos_cagr": oos_metrics.get("cagr", 0.0),
+            "oos_max_dd": oos_metrics.get("max_drawdown", 0.0),
+            "oos_trades": oos_metrics.get("total_trades", 0),
+            "oos_win_rate": oos_metrics.get("win_rate", 0.0),
+        })
+
+        is_start = _add_months(is_start, oos_months)
+
+    # Aggregate OOS results
+    if windows:
+        avg_is = sum(w["is_sharpe"] for w in windows) / len(windows)
+        avg_oos = sum(w["oos_sharpe"] for w in windows) / len(windows)
+        degradation = avg_oos / avg_is if avg_is != 0 else 0.0
+    else:
+        avg_is = avg_oos = degradation = 0.0
+
+    return {
+        "windows": windows,
+        "avg_is_sharpe": avg_is,
+        "avg_oos_sharpe": avg_oos,
+        "degradation_ratio": degradation,
+        "num_windows": len(windows),
+    }
+
+
+def _set_nested(obj, dotpath: str, value):
+    """Set a value in a nested dict/list using a dot-path key.
+
+    Examples:
+        _set_nested(d, "buy_when.0.2", 15)  -> d["buy_when"][0][2] = 15
+        _set_nested(d, "indicators.rsi_2.period", 3)  -> d["indicators"]["rsi_2"]["period"] = 3
+    """
+    parts = dotpath.split(".")
+    current = obj
+    for part in parts[:-1]:
+        if isinstance(current, list):
+            current = current[int(part)]
+        else:
+            current = current[part]
+    final_key = parts[-1]
+    if isinstance(current, list):
+        current[int(final_key)] = value
+    else:
+        current[final_key] = value
+
+
 def _add_months(d: date, months: int) -> date:
     """Add months to a date, clamping to valid day."""
     month = d.month + months

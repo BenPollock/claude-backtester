@@ -24,12 +24,13 @@ def deflated_sharpe_ratio(
     draws from the null distribution.
 
     Args:
-        observed_sharpe: The best Sharpe ratio found.
+        observed_sharpe: The best (annualized) Sharpe ratio found.
         num_trials: Number of parameter combos tested.
-        variance_of_sharpes: Variance of Sharpe ratios across all combos.
+        variance_of_sharpes: Variance of annualized Sharpe ratios across
+            all combos (or estimated via estimate_sharpe_variance).
         n_returns: Number of daily returns used.
         skewness: Skewness of daily returns (default 0).
-        kurtosis: Excess kurtosis of daily returns (default 3 = normal).
+        kurtosis: Kurtosis of daily returns (default 3 = normal).
 
     Returns:
         DSR value between 0 and 1. Higher means less likely to be
@@ -40,15 +41,21 @@ def deflated_sharpe_ratio(
     if variance_of_sharpes <= 0:
         return 0.0
 
+    # Convert annualized Sharpe to daily for the SE correction terms.
+    # The Lo (2002) SE formula uses the daily Sharpe ratio:
+    #   SE(SR_daily) = sqrt((1 + 0.5*SR_d^2 - skew*SR_d + ((k-3)/4)*SR_d^2) / (T-1))
+    # Then SE(SR_annual) = SE(SR_daily) * sqrt(252)
+    sr_daily = observed_sharpe / math.sqrt(252) if observed_sharpe != 0 else 0.0
+
     if num_trials <= 1:
         # No multiple-testing penalty: test if observed Sharpe is
         # significantly above zero using its standard error.
         se = math.sqrt(
-            (1 + 0.5 * observed_sharpe ** 2
-             - skewness * observed_sharpe
-             + ((kurtosis - 3) / 4) * observed_sharpe ** 2)
+            (1 + 0.5 * sr_daily ** 2
+             - skewness * sr_daily
+             + ((kurtosis - 3) / 4) * sr_daily ** 2)
             / (n_returns - 1)
-        )
+        ) * math.sqrt(252)
         if se <= 0:
             return 0.0
         return _norm_cdf(observed_sharpe / se)
@@ -61,13 +68,13 @@ def deflated_sharpe_ratio(
            + euler_mascheroni * _norm_ppf(1 - 1.0 / (num_trials * math.e)))
     )
 
-    # Standard error of Sharpe (with skew/kurtosis correction)
+    # Standard error of the annualized Sharpe (with skew/kurtosis correction)
     se = math.sqrt(
-        (1 + 0.5 * observed_sharpe ** 2
-         - skewness * observed_sharpe
-         + ((kurtosis - 3) / 4) * observed_sharpe ** 2)
+        (1 + 0.5 * sr_daily ** 2
+         - skewness * sr_daily
+         + ((kurtosis - 3) / 4) * sr_daily ** 2)
         / (n_returns - 1)
-    )
+    ) * math.sqrt(252)
 
     if se <= 0:
         return 0.0
@@ -78,20 +85,40 @@ def deflated_sharpe_ratio(
 
 def estimate_sharpe_variance(returns: np.ndarray, n_bootstraps: int = 500,
                              seed: int = 42) -> float:
-    """Estimate variance of Sharpe ratio via bootstrap resampling.
+    """Estimate variance of the annualized Sharpe ratio via the Lo (2002) formula.
 
-    Resamples daily returns with replacement to generate a distribution
-    of Sharpe ratios, then returns the variance of that distribution.
+    For the DSR, we need the variance of annualized Sharpe ratios that
+    would be observed across independent strategy trials. Under H0 (no
+    skill), all strategies have true SR=0, and the observed variance comes
+    from sampling error. The Lo (2002) formula gives:
+
+        Var(SR_daily) = (1 + 0.5*SR_d^2 - skew*SR_d + ((k-3)/4)*SR_d^2) / (T-1)
+        Var(SR_annual) = Var(SR_daily) * 252
+
+    The n_bootstraps and seed parameters are retained for API compatibility
+    but are no longer used (the analytical formula replaced bootstrap).
     """
     if len(returns) < 10:
         return 1.0
-    rng = np.random.default_rng(seed)
-    sharpes = []
+
     n = len(returns)
-    for _ in range(n_bootstraps):
-        sample = rng.choice(returns, size=n, replace=True)
-        sharpes.append(_sharpe_from_returns(sample))
-    return float(np.var(sharpes))
+    std = returns.std()
+    if std == 0:
+        return 1.0
+
+    sr_daily = returns.mean() / std
+    skew = float(pd.Series(returns).skew()) if len(returns) > 2 else 0.0
+    kurt = float(pd.Series(returns).kurtosis()) + 3.0 if len(returns) > 3 else 3.0
+
+    # Lo (2002) variance of annualized Sharpe ratio
+    var_sr_daily = (
+        1 + 0.5 * sr_daily ** 2
+        - skew * sr_daily
+        + ((kurt - 3) / 4) * sr_daily ** 2
+    ) / (n - 1)
+    var_sr_annual = var_sr_daily * 252
+
+    return max(float(var_sr_annual), 1e-10)
 
 
 def permutation_test(

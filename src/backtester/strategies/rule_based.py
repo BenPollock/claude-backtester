@@ -2,6 +2,7 @@
 
 import math
 import operator
+from datetime import date
 
 import pandas as pd
 
@@ -124,6 +125,9 @@ class RuleBasedStrategy(Strategy):
         benchmark_indicators: dict of {col_name: {fn, ...params}} for benchmark
         buy_when: list of [left, op, right] rules (AND logic)
         sell_when: list of [left, op, right] rules (AND logic)
+        short_when: list of [left, op, right] rules (AND logic) — open short
+        cover_when: list of [left, op, right] rules (AND logic) — close short
+        max_hold_days: int — force exit after N calendar days (optional)
     """
 
     def __init__(self):
@@ -132,12 +136,18 @@ class RuleBasedStrategy(Strategy):
         self._benchmark_specs: dict = {}
         self._buy_rules: list = []
         self._sell_rules: list = []
+        self._short_rules: list = []
+        self._cover_rules: list = []
+        self._max_hold_days: int | None = None
 
     def configure(self, params: dict) -> None:
         self._indicator_specs = params.get("indicators", {})
         self._benchmark_specs = params.get("benchmark_indicators", {})
         self._buy_rules = params.get("buy_when", [])
         self._sell_rules = params.get("sell_when", [])
+        self._short_rules = params.get("short_when", [])
+        self._cover_rules = params.get("cover_when", [])
+        self._max_hold_days = params.get("max_hold_days")
 
         # Validate indicator function names
         for col_name, spec in {**self._indicator_specs, **self._benchmark_specs}.items():
@@ -148,6 +158,8 @@ class RuleBasedStrategy(Strategy):
 
         _validate_rules(self._buy_rules, "buy_when")
         _validate_rules(self._sell_rules, "sell_when")
+        _validate_rules(self._short_rules, "short_when")
+        _validate_rules(self._cover_rules, "cover_when")
 
     def compute_indicators(
         self,
@@ -181,14 +193,33 @@ class RuleBasedStrategy(Strategy):
             for key, val in benchmark_row.items():
                 context[f"bm_{key}"] = val
 
-        has_position = position is not None and position.total_quantity > 0
+        has_long = position is not None and position.total_quantity > 0
+        has_short = position is not None and position.is_short
 
-        if has_position and self._sell_rules:
+        # Time-based exit: force sell/cover after max_hold_days
+        if self._max_hold_days is not None and (has_long or has_short):
+            current_date = pd.Timestamp(row.name).date() if hasattr(row.name, 'date') else row.name
+            oldest_entry = min(lot.entry_date for lot in position.lots)
+            if isinstance(oldest_entry, pd.Timestamp):
+                oldest_entry = oldest_entry.date()
+            days_held = (current_date - oldest_entry).days
+            if days_held >= self._max_hold_days:
+                return SignalAction.COVER if has_short else SignalAction.SELL
+
+        # Close existing positions first
+        if has_long and self._sell_rules:
             if _evaluate_rules(self._sell_rules, context):
                 return SignalAction.SELL
 
-        if not has_position and self._buy_rules:
-            if _evaluate_rules(self._buy_rules, context):
+        if has_short and self._cover_rules:
+            if _evaluate_rules(self._cover_rules, context):
+                return SignalAction.COVER
+
+        # Open new positions only when flat
+        if not has_long and not has_short:
+            if self._buy_rules and _evaluate_rules(self._buy_rules, context):
                 return SignalAction.BUY
+            if self._short_rules and _evaluate_rules(self._short_rules, context):
+                return SignalAction.SHORT
 
         return SignalAction.HOLD
